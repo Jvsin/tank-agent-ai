@@ -70,7 +70,7 @@ class IntelligentAgent:
         
         # Stan nawigacji
         self.current_path = None
-        self.current_waypoint = None
+        self.current_waypoint = (250.0, 250.0)  # Domyślnie jedź do środka mapy
         self.waypoint_index = 0
         self.path_recalc_timer = 0
         
@@ -120,6 +120,15 @@ class IntelligentAgent:
         current_state = self.fsm.update(my_tank_status, sensor_data, self.heat_map)
         target_position = self.fsm.get_target_position(my_tank_status, sensor_data, self.heat_map)
         
+        # --- 3.5: Jeśli brak celu (EXPLORE), losuj punkt na mapie ---
+        if target_position is None:
+            # Losowy punkt w obszarze mapy (zakładam 500x500)
+            import random
+            target_position = (
+                random.uniform(50, 450),
+                random.uniform(50, 450)
+            )
+        
         # --- 4. A* - Wyznaczenie ścieżki ---
         self.path_recalc_timer += 1
         
@@ -149,6 +158,9 @@ class IntelligentAgent:
                 )
                 if wp_dist < 5.0:
                     self.waypoint_index += 1
+            elif not self.current_path:
+                # Jeśli pathfinder zawiódł, jedź bezpośrednio do celu
+                self.current_waypoint = target_position
         
         # --- 5. TSK-D - Sterowanie ruchem ---
         drive_output = self.tsk_drive.compute(
