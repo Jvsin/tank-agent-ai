@@ -101,6 +101,12 @@ class TSKDriveController:
         
         move_speed = my_top_speed * speed_multiplier * distance_multiplier * terrain_modifier
         
+        # DEBUG - wypisz pierwsze obliczenie
+        if not hasattr(self, '_debug_printed'):
+            print(f"[TSK-D DEBUG] top_speed={my_top_speed}, speed_mult={speed_multiplier}, dist_mult={distance_multiplier}")
+            print(f"[TSK-D DEBUG] Final move_speed={move_speed}, heading_rotation={heading_rotation}")
+            self._debug_printed = True
+        
         return {
             'heading_rotation': heading_rotation,
             'move_speed': move_speed

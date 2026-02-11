@@ -6,6 +6,10 @@ Uruchomienie:
     python intelligent_agent.py --port 8001 --name "IntelligentBot"
 """
 
+print("="*60)
+print("INTELLIGENT AGENT START!")
+print("="*60)
+
 import sys
 import os
 import json
@@ -109,8 +113,14 @@ class IntelligentAgent:
     ) -> ActionCommand:
         """Główna pętla decyzyjna agenta."""
         
+        # MEGA DEBUG - wypisz na początku
+        if current_tick == 0:
+            print(f"[{self.name}] PIERWSZA AKCJA! my_tank_status keys: {my_tank_status.keys()}")
+            print(f"[{self.name}] _top_speed = {my_tank_status.get('_top_speed')}")
+            print(f"[{self.name}] position = {my_tank_status.get('position')}")
+        
         # --- 1. AKTUALIZACJA HEAT MAP ---
-        self.heat_map.update(sensor_data, my_tank_status['position'])
+        self.heat_map.update(sensor_data, my_tank_status.get('position', {'x': 250, 'y': 250}))
         
         # --- 2. AKTUALIZACJA PATHFINDER ---
         self.pathfinder.update_obstacles(sensor_data)
@@ -133,7 +143,8 @@ class IntelligentAgent:
         self.path_recalc_timer += 1
         
         if target_position:
-            current_pos = (my_tank_status['position']['x'], my_tank_status['position']['y'])
+            pos_dict = my_tank_status.get('position', {'x': 250, 'y': 250})
+            current_pos = (pos_dict.get('x', 250), pos_dict.get('y', 250))
             
             # Przelicz ścieżkę co 30 ticków lub po osiągnięciu waypointa
             should_recalc = (
@@ -165,27 +176,33 @@ class IntelligentAgent:
         # --- 5. TSK-D - Sterowanie ruchem ---
         drive_output = self.tsk_drive.compute(
             waypoint=self.current_waypoint,
-            my_position=my_tank_status['position'],
-            my_heading=my_tank_status['heading'],
-            my_heading_spin_rate=my_tank_status['_heading_spin_rate'],
-            my_top_speed=my_tank_status['_top_speed'],
+            my_position=my_tank_status.get('position', {'x': 250, 'y': 250}),
+            my_heading=my_tank_status.get('heading', 0.0),
+            my_heading_spin_rate=my_tank_status.get('_heading_spin_rate', 0.0),
+            my_top_speed=my_tank_status.get('_top_speed', 1.0),
             terrain_modifier=1.0  # TODO: Pobierz z terenu pod czołgiem
         )
         
         # --- 6. TSK-C - Sterowanie walką ---
         combat_output = {'barrel_rotation': 0.0, 'ammo_type': 'LIGHT', 'should_fire': False}
         
-        if sensor_data.get('seen_tanks', []):
+        seen_tanks = sensor_data.get('seen_tanks', [])
+        if current_tick % 60 == 0:
+            print(f"[{self.name}] DEBUG: seen_tanks count = {len(seen_tanks)}")
+        
+        if seen_tanks:
             # Wybierz najbliższego wroga
             enemies = sensor_data['seen_tanks']
             closest_enemy = min(enemies, key=lambda e: e.get('distance', float('inf')))
             
             # Oblicz błąd kąta między lufą a wrogiem
-            dx = closest_enemy['position']['x'] - my_tank_status['position']['x']
-            dy = closest_enemy['position']['y'] - my_tank_status['position']['y']
+            enemy_pos = closest_enemy.get('position', {'x': 250, 'y': 250})
+            my_pos = my_tank_status.get('position', {'x': 250, 'y': 250})
+            dx = enemy_pos.get('x', 250) - my_pos.get('x', 250)
+            dy = enemy_pos.get('y', 250) - my_pos.get('y', 250)
             
             target_barrel_angle = math.degrees(math.atan2(dx, dy)) % 360
-            angle_error = target_barrel_angle - my_tank_status['barrel_angle']
+            angle_error = target_barrel_angle - my_tank_status.get('barrel_angle', 0)
             
             # Normalizacja angle_error
             while angle_error > 180:
@@ -198,10 +215,18 @@ class IntelligentAgent:
                 angle_error=angle_error,
                 enemy_hp_ratio=0.5,  # TODO: Szacuj HP wroga jeśli dostępne
                 reload_status=my_tank_status.get('current_reload_progress', 0),
-                my_barrel_spin_rate=my_tank_status['_barrel_spin_rate']
+                my_barrel_spin_rate=my_tank_status.get('_barrel_spin_rate', 0.0)
             )
+            
+            # DEBUG walki
+            if current_tick % 60 == 0:
+                print(f"[{self.name}] COMBAT: dist={closest_enemy.get('distance', 0):.1f}, angle_err={abs(angle_error):.1f}°, reload={my_tank_status.get('current_reload_progress', -1)}, fire={combat_output['should_fire']}")
         
         # --- 7. GENEROWANIE AKCJI ---
+        # DEBUG
+        if current_tick % 60 == 0:  # Co sekundę
+            print(f"[{self.name}] Tick {current_tick}: State={current_state.name}, Waypoint={self.current_waypoint}, Speed={drive_output['move_speed']:.1f}")
+        
         return ActionCommand(
             barrel_rotation_angle=combat_output['barrel_rotation'],
             heading_rotation_angle=drive_output['heading_rotation'],
@@ -242,13 +267,22 @@ async def root():
 @app.post("/agent/action", response_model=ActionCommand)
 async def get_action(payload: Dict[str, Any] = Body(...)):
     """Główny endpoint - zwraca akcję agenta."""
-    action = agent.get_action(
-        current_tick=payload.get('current_tick', 0),
-        my_tank_status=payload.get('my_tank_status', {}),
-        sensor_data=payload.get('sensor_data', {}),
-        enemies_remaining=payload.get('enemies_remaining', 0)
-    )
-    return action
+    try:
+        print(f"[API] Otrzymano request, tick={payload.get('current_tick', 0)}")
+        action = agent.get_action(
+            current_tick=payload.get('current_tick', 0),
+            my_tank_status=payload.get('my_tank_status', {}),
+            sensor_data=payload.get('sensor_data', {}),
+            enemies_remaining=payload.get('enemies_remaining', 0)
+        )
+        print(f"[API] Zwracam akcję: speed={action.move_speed}, heading_rot={action.heading_rotation_angle}")
+        return action
+    except Exception as e:
+        print(f"[API ERROR] CRASH w get_action: {e}")
+        import traceback
+        traceback.print_exc()
+        # Zwróć bezpieczną akcję
+        return ActionCommand()
 
 
 @app.post("/agent/destroy", status_code=204)

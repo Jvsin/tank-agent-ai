@@ -560,7 +560,8 @@ def main():
             port = AGENT_BASE_PORT + i
             name = f"Bot_{i+1}"
             command = [sys.executable, agent_script_path, "--port", str(port), "--name", name]
-            proc = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            # ZMIANA: Pozostaw stdout/stderr widoczne żeby widzieć błędy agentów
+            proc = subprocess.Popen(command)
             agent_processes.append(proc)
             print(f"  -> Agent '{name}' uruchomiony na porcie {port} (PID: {proc.pid})")
 
