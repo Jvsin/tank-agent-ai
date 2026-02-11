@@ -1,0 +1,13 @@
+{
+  "description": "Parametry TSK Combat Controller - optymalizowane przez GA",
+  "dist_close": 8.0,
+  "dist_medium": 15.0,
+  "dist_far": 25.0,
+  "angle_small": 5.0,
+  "angle_medium": 15.0,
+  "angle_large": 45.0,
+  "fire_angle_threshold": 10.0,
+  "fire_reload_threshold": 0,
+  "rotation_gain": 1.5,
+  "rotation_slow_gain": 0.5
+}
