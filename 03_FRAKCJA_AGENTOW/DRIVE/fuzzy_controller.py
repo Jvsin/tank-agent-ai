@@ -39,6 +39,10 @@ class FuzzyMotionController:
         """Inicjalizacja systemu rozmytego - definiujemy zmienne i reguły."""
         print("[FuzzyController] Inicjalizacja...")
         
+        # Stan eksploracji (gdy nie ma wrogów)
+        self.exploration_heading_offset = 0.0  # Losowy offset eksploracji
+        self.exploration_timer = 0  # Co ile ticków zmieniać kierunek
+        
         # ===================================================================
         # KROK 1: DEFINICJA ZMIENNYCH WEJŚCIOWYCH (Antecedent)
         # ===================================================================
@@ -202,9 +206,11 @@ class FuzzyMotionController:
         # Znajdź najbliższego wroga
         closest_enemy_dist = 100.0  # Domyślnie daleko
         enemy_angle = 0.0  # Kąt do wroga
+        enemies_visible = False  # Flaga czy widzimy wrogów
         
         seen_tanks = sensor_data.get('seen_tanks', [])
         if seen_tanks:
+            enemies_visible = True
             min_dist = float('inf')
             closest_enemy = None
             
@@ -285,16 +291,36 @@ class FuzzyMotionController:
         # KROK 5: PRZELICZ NA RZECZYWISTE KOMENDY
         # ===================================================================
         
-        # Oblicz różnicę kąta między naszym heading a kierunkiem do wroga
-        angle_diff = self._normalize_angle_diff(enemy_angle - my_heading)
+        # ===================================================================
+        # KROK 6: TRYB EKSPLORACJI (gdy nie ma wrogów w zasięgu)
+        # ===================================================================
         
-        # Skręt: turn_factor * angle_diff
-        # Jeśli turn_factor = 1.0 → skręcamy maksymalnie w stronę wroga
-        # Jeśli turn_factor = -1.0 → skręcamy maksymalnie od wroga
-        # Jeśli turn_factor = 0.0 → nie skręcamy
-        heading_rotation = turn_factor * min(45.0, max(-45.0, angle_diff))
-        
-        move_speed = speed_output
+        if not enemies_visible:
+            # EKSPLORACJA - jedź prosto z losowymi skrętami
+            self.exploration_timer -= 1
+            
+            if self.exploration_timer <= 0:
+                # Co 30-60 ticków zmień kierunek eksploracji
+                import random
+                self.exploration_heading_offset = random.uniform(-20.0, 20.0)
+                self.exploration_timer = random.randint(30, 60)
+            
+            # Jedź w losowym kierunku eksploracyjnym
+            heading_rotation = self.exploration_heading_offset
+            move_speed = 25.0  # Średnia prędkość eksploracji
+            
+        else:
+            # NORMALNY TRYB - reaguj na wroga
+            # Oblicz różnicę kąta między naszym heading a kierunkiem do wroga
+            angle_diff = self._normalize_angle_diff(enemy_angle - my_heading)
+            
+            # Skręt: turn_factor * angle_diff
+            # Jeśli turn_factor = 1.0 → skręcamy maksymalnie w stronę wroga
+            # Jeśli turn_factor = -1.0 → skręcamy maksymalnie od wroga
+            # Jeśli turn_factor = 0.0 → nie skręcamy
+            heading_rotation = turn_factor * min(45.0, max(-45.0, angle_diff))
+            
+            move_speed = speed_output
         
         return heading_rotation, move_speed
     
@@ -308,48 +334,3 @@ class FuzzyMotionController:
         while angle < -180:
             angle += 360
         return angle
-
-
-# ===================================================================
-# FUNKCJE POMOCNICZE
-# ===================================================================
-
-def get_position_tuple(pos_obj) -> Tuple[float, float]:
-    """Konwertuje obiekt pozycji na tuple (x, y)."""
-    if isinstance(pos_obj, dict):
-        return pos_obj.get('x', 0.0), pos_obj.get('y', 0.0)
-    elif hasattr(pos_obj, 'x') and hasattr(pos_obj, 'y'):
-        return pos_obj.x, pos_obj.y
-    else:
-        return 0.0, 0.0
-
-
-# ===================================================================
-# TEST (opcjonalny - do debugowania)
-# ===================================================================
-
-if __name__ == "__main__":
-    print("=== TEST FUZZY CONTROLLER ===\n")
-    
-    controller = FuzzyMotionController()
-    
-    # Symulacja: wróg blisko, moje HP wysokie, droga wolna
-    test_sensor_data = {
-        'seen_tanks': [
-            {'position': {'x': 20, 'y': 20}}  # Wróg 20m stąd
-        ],
-        'seen_obstacles': []
-    }
-    
-    heading_rot, speed = controller.compute_motion(
-        my_position=(0, 0),
-        my_heading=45.0,  # Patrzę w kierunku 45°
-        my_hp=80,
-        max_hp=100,
-        sensor_data=test_sensor_data
-    )
-    
-    print(f"\nWyniki:")
-    print(f"  Heading rotation: {heading_rot:.2f}°")
-    print(f"  Move speed: {speed:.2f}")
-    print("\n✓ Test zakończony!")

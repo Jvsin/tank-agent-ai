@@ -34,9 +34,10 @@ from typing import Dict, Any
 from fastapi import FastAPI, Body
 from pydantic import BaseModel
 import uvicorn
+import random
 
-# Import fuzzy controller
-from fuzzy_controller import FuzzyMotionController
+# Import modułów jazdy z DRIVE
+from DRIVE import DecisionMaker, FuzzyMotionController
 
 
 # ============================================================================
@@ -52,10 +53,6 @@ class ActionCommand(BaseModel):
     should_fire: bool = False
 
 
-# ============================================================================
-# FUZZY LOGIC AGENT
-# ============================================================================
-
 class FuzzyAgent:
     """
     Agent używający logiki rozmytej (fuzzy logic) do podejmowania decyzji.
@@ -70,8 +67,11 @@ class FuzzyAgent:
         self.is_destroyed = False
         print(f"[{self.name}] Agent inicjalizowany...")
 
-        # Fuzzy controller dla ruchu
+        # Fuzzy controller dla ruchu (walka/eksploracja)
         self.motion_controller = FuzzyMotionController()
+        
+        # Decision maker (hierarchia priorytetów)
+        self.decision_maker = DecisionMaker()
 
         # State for barrel scanning
         self.barrel_scan_direction = 1.0  # 1.0 for right, -1.0 for left
@@ -80,7 +80,7 @@ class FuzzyAgent:
         # State for aiming before shooting
         self.aim_timer = 0  # Ticks to wait before firing
         
-        print(f"[{self.name}] ✓ Agent gotowy!")
+        print(f"[{self.name}] ✓ Agent gotowy z hierarchią decyzji!")
     
     def get_action(
         self, 
@@ -89,12 +89,20 @@ class FuzzyAgent:
         sensor_data: Dict[str, Any], 
         enemies_remaining: int
     ) -> ActionCommand:
-        """Główna metoda - podejmij decyzję na podstawie fuzzy logic."""
+        """
+        Główna metoda - HIERARCHIA DECYZJI.
+        
+        Sprawdzamy reguły od najważniejszych:
+        1. Bezpośrednie zagrożenie (damaging terrain)
+        2. Kolizja z przeszkodą
+        3. Powerup w pobliżu (jeśli brak wrogów)
+        4. Fuzzy logic (walka/eksploracja)
+        """
         should_fire = False
         barrel_rotation = 0.0
         
         # ===================================================================
-        # WYCIĄGNIJ DANE O CZOŁGU
+        # EKSTRAKCJA DANYCH O CZOŁGU
         # ===================================================================
         
         # Pozycja
@@ -113,19 +121,54 @@ class FuzzyAgent:
         barrel_angle = my_tank_status.get('barrel_angle', 0.0)
         
         # ===================================================================
-        # FUZZY LOGIC MOTION CONTROL
+        # HIERARCHIA DECYZJI (PRIORYTET OD NAJWYŻSZEGO)
         # ===================================================================
         
-        heading_rotation, move_speed = self.motion_controller.compute_motion(
-            my_position=my_position,
-            my_heading=my_heading,
-            my_hp=my_hp,
-            max_hp=max_hp,
-            sensor_data=sensor_data
-        )
+        heading_rotation = 0.0
+        move_speed = 0.0
+        decision_source = "none"
+        
+        # --- PRIORYTET 1: SZKODLIWY TEREN ---
+        result = self.decision_maker.check_damaging_terrain(my_x, my_y, sensor_data)
+        if result:
+            _, heading_rotation, move_speed = result
+            decision_source = "damaging_terrain"
+        
+        # --- PRIORYTET 2: KOLIZJA Z PRZESZKODĄ ---
+        if not result:
+            result = self.decision_maker.check_imminent_collision(
+                my_x, my_y, my_heading, sensor_data
+            )
+            if result:
+                _, heading_rotation, move_speed = result
+                decision_source = "collision_avoidance"
+        
+        # --- PRIORYTET 3: POWERUP W POBLIŻU ---
+        if not result:
+            result = self.decision_maker.check_nearby_powerup(
+                my_x, my_y, my_heading, sensor_data
+            )
+            if result:
+                _, heading_rotation, move_speed = result
+                decision_source = "powerup_collection"
+        
+        # --- PRIORYTET 4: FUZZY LOGIC (WALKA/EKSPLORACJA) ---
+        if not result:
+            heading_rotation, move_speed = self.motion_controller.compute_motion(
+                my_position=my_position,
+                my_heading=my_heading,
+                my_hp=my_hp,
+                max_hp=max_hp,
+                sensor_data=sensor_data
+            )
+            decision_source = "fuzzy_logic"
+        
+        # Debug info (opcjonalnie)
+        if current_tick % 60 == 0:  # Co sekundę
+            print(f"[{self.name}] Tick {current_tick}: Decision={decision_source}, Speed={move_speed:.1f}, Turn={heading_rotation:.1f}")
         
         # ===================================================================
-        # BARREL SCANNING (skanuj celem w poszukiwaniu wroga)
+        # BARREL SCANNING & SHOOTING
         # ===================================================================
         
         if self.aim_timer > 0:
@@ -139,17 +182,17 @@ class FuzzyAgent:
         else:
             # Skanuj lufą w lewo-prawo
             if barrel_angle > 45.0:
-                self.barrel_scan_direction = -1.0  # Scan left
+                self.barrel_scan_direction = -1.0
             elif barrel_angle < -45.0:
-                self.barrel_scan_direction = 1.0  # Scan right
+                self.barrel_scan_direction = 1.0
             barrel_rotation = self.barrel_rotation_speed * self.barrel_scan_direction
             
             # Jeśli widzimy wroga - zacznij celować
             seen_tanks = sensor_data.get('seen_tanks', [])
             if seen_tanks and len(seen_tanks) > 0:
                 # Wróg w zasięgu - przygotuj się do strzału
-                if random.random() < 0.2:  # 20% szansy na rozpoczęcie celowania
-                    self.aim_timer = 5  # Celuj przez 5 ticków
+                if random.random() < 0.2:  # 20% szansy
+                    self.aim_timer = 5
         
         return ActionCommand(
             barrel_rotation_angle=barrel_rotation,
