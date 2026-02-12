@@ -216,7 +216,7 @@ class GameCore:
             alive_count: Liczba żywych czołgów
         """
         self.game_state.tanks_alive_per_team[team] = alive_count
-        self.logger.debug(f"Team {team} has {alive_count} tanks alive")
+        # self.logger.debug(f"Team {team} has {alive_count} tanks alive")
 
     def get_current_tick(self) -> int:
         """Pobieranie aktualnego tick'a."""

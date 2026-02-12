@@ -73,7 +73,7 @@ TEAM_B_NBR = 5  # Number of tanks in Team B (Team 2)
 # Base port for agent servers (tank_1_1 -> 8001, tank_1_2 -> 8002, etc.)
 AGENT_BASE_PORT = 8001
 AGENT_HOST = "127.0.0.1"
-AGENT_TIMEOUT = 1.0  # Seconds to wait for agent response
+AGENT_TIMEOUT = 5.0  # Seconds to wait for agent response
 
 
 # ============================================================================
@@ -717,7 +717,7 @@ class GameLoop:
             self.map_info.powerup_list.append(new_powerup)
 
             # Print to console as requested
-            print(f"[INFO] Power-up spawned: {new_powerup._powerup_type.name} at ({new_powerup._position.x:.1f}, {new_powerup._position.y:.1f})")
+            # print(f"[INFO] Power-up spawned: {new_powerup._powerup_type.name} at ({new_powerup._position.x:.1f}, {new_powerup._position.y:.1f})")
 
             self.logger.log_powerup_action("powerup_new", "spawn", {"type": new_powerup._powerup_type.name, "position": (new_powerup._position.x, new_powerup._position.y)})
             return  # Exit after successful spawn
@@ -817,15 +817,17 @@ class GameLoop:
 
             except httpx.ConnectError:
                 # Agent not running, skip
-                pass
+                print(f"[AGENT] connect error tank={tank_id} url={connection.base_url}")
             except httpx.TimeoutException:
                 self.logger.log_agent_interaction(
                     connection.base_url, "timeout", tank_id=tank_id
                 )
+                print(f"[AGENT] timeout tank={tank_id} url={connection.base_url}")
             except Exception as e:
                 self.logger.log_agent_interaction(
                     connection.base_url, "error", error=str(e), tank_id=tank_id
                 )
+                print(f"[AGENT] error tank={tank_id} url={connection.base_url} err={e}")
 
         return agent_actions
 
@@ -883,7 +885,7 @@ class GameLoop:
                 {
                     "id": getattr(o, "_id", ""),
                     "position": {"x": o._position.x, "y": o._position.y},
-                    "type": o._obstacle_type,
+                    "type": getattr(o._obstacle_type, "name", str(o._obstacle_type)),
                     "is_destructible": o.is_destructible,
                 }
                 for o in sensor_data.seen_obstacles

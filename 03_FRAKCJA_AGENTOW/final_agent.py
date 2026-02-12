@@ -53,6 +53,9 @@ class ActionCommand(BaseModel):
     should_fire: bool = False
 
 
+ACTION_LOG_EVERY = 1
+
+
 class FuzzyAgent:
     """
     Agent używający logiki rozmytej (fuzzy logic) do podejmowania decyzji.
@@ -98,12 +101,61 @@ class FuzzyAgent:
         3. Powerup w pobliżu (jeśli brak wrogów)
         4. Fuzzy logic (walka/eksploracja)
         """
+        ACTION_LOG_EVERY = 1
+        REQUEST_LOG_EVERY = 30
+        
+        def clamp(value: float, min_value: float, max_value: float) -> float:
+            return max(min_value, min(value, max_value))
+
+        if REQUEST_LOG_EVERY > 0 and current_tick % REQUEST_LOG_EVERY == 0:
+            print(f"[{self.name}] Request tick={current_tick}")
+
         should_fire = False
         barrel_rotation = 0.0
         
         # ===================================================================
         # EKSTRAKCJA DANYCH O CZOŁGU
         # ===================================================================
+        try:
+            # --- PRIORYTET 1: SZKODLIWY TEREN ---
+            result = self.decision_maker.check_damaging_terrain(my_x, my_y, sensor_data)
+            if result:
+                _, heading_rotation, move_speed = result
+                decision_source = "damaging_terrain"
+
+            # --- PRIORYTET 2: KOLIZJA Z PRZESZKODĄ ---
+            if not result:
+                result = self.decision_maker.check_imminent_collision(
+                    my_x, my_y, my_heading, sensor_data
+                )
+                if result:
+                    _, heading_rotation, move_speed = result
+                    decision_source = "collision_avoidance"
+
+            # --- PRIORYTET 3: POWERUP W POBLIŻU ---
+            if not result:
+                result = self.decision_maker.check_nearby_powerup(
+                    my_x, my_y, my_heading, sensor_data
+                )
+                if result:
+                    _, heading_rotation, move_speed = result
+                    decision_source = "powerup_collection"
+
+            # --- PRIORYTET 4: FUZZY LOGIC (WALKA/EKSPLORACJA) ---
+            if not result:
+                heading_rotation, move_speed = self.motion_controller.compute_motion(
+                    my_position=my_position,
+                    my_heading=my_heading,
+                    my_hp=my_hp,
+                    max_hp=max_hp,
+                    sensor_data=sensor_data
+                )
+                decision_source = "fuzzy_logic"
+        except Exception as exc:
+            print(f"[{self.name}] get_action error: {exc}")
+            heading_rotation = 0.0
+            move_speed = 0.0
+            decision_source = "error"
         
         # Pozycja
         pos = my_tank_status.get('position', {})
@@ -119,6 +171,9 @@ class FuzzyAgent:
         my_hp = my_tank_status.get('hp', 100)
         max_hp = my_tank_status.get('_max_hp', 100)
         barrel_angle = my_tank_status.get('barrel_angle', 0.0)
+        max_heading = float(my_tank_status.get('_heading_spin_rate', 30.0) or 30.0)
+        max_barrel = float(my_tank_status.get('_barrel_spin_rate', 30.0) or 30.0)
+        top_speed = float(my_tank_status.get('_top_speed', 3.0) or 3.0)
         
         # ===================================================================
         # HIERARCHIA DECYZJI (PRIORYTET OD NAJWYŻSZEGO)
@@ -162,10 +217,16 @@ class FuzzyAgent:
                 sensor_data=sensor_data
             )
             decision_source = "fuzzy_logic"
+
+        heading_rotation = clamp(heading_rotation, -max_heading, max_heading)
+        move_speed = clamp(move_speed, -top_speed, top_speed)
         
         # Debug info (opcjonalnie)
-        if current_tick % 60 == 0:  # Co sekundę
-            print(f"[{self.name}] Tick {current_tick}: Decision={decision_source}, Speed={move_speed:.1f}, Turn={heading_rotation:.1f}")
+        if ACTION_LOG_EVERY > 0 and current_tick % ACTION_LOG_EVERY == 0:
+            print(
+                f"[{self.name}] Tick {current_tick}: Decision={decision_source}, "
+                f"Speed={move_speed:.2f}, Turn={heading_rotation:.2f}, Barrel={barrel_rotation:.2f}"
+            )
         
         # ===================================================================
         # BARREL SCANNING & SHOOTING
@@ -185,7 +246,8 @@ class FuzzyAgent:
                 self.barrel_scan_direction = -1.0
             elif barrel_angle < -45.0:
                 self.barrel_scan_direction = 1.0
-            barrel_rotation = self.barrel_rotation_speed * self.barrel_scan_direction
+            barrel_step = min(self.barrel_rotation_speed, max_barrel)
+            barrel_rotation = barrel_step * self.barrel_scan_direction
             
             # Jeśli widzimy wroga - zacznij celować
             seen_tanks = sensor_data.get('seen_tanks', [])
@@ -195,7 +257,7 @@ class FuzzyAgent:
                     self.aim_timer = 5
         
         return ActionCommand(
-            barrel_rotation_angle=barrel_rotation,
+            barrel_rotation_angle=clamp(barrel_rotation, -max_barrel, max_barrel),
             heading_rotation_angle=heading_rotation,
             move_speed=move_speed,
             should_fire=should_fire
@@ -276,4 +338,4 @@ if __name__ == "__main__":
         agent.name = f"FuzzyBot_{args.port}"
     
     print(f"Starting {agent.name} on {args.host}:{args.port}")
-    uvicorn.run(app, host=args.host, port=args.port)
+    uvicorn.run(app, host=args.host, port=args.port, log_level="warning", access_log=False)
