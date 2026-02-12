@@ -1,18 +1,19 @@
 """
-Random Walking and Shooting Agent for Testing
-Agent losowo chodzący i strzelający do testów
+Fuzzy Logic Tank Agent
+Agent czołgu używający logiki rozmytej do podejmowania decyzji
 
-This agent implements IAgentController and performs random actions:
-- Random barrel and heading rotation
-- Random movement speed
-- Random shooting
+Ten agent wykorzystuje scikit-fuzzy do inteligentnego poruszania się:
+- Omija przeszkody
+- Atakuje wrogów gdy ma dużo HP
+- Ucieka gdy HP jest niskie
+- Używa logiki rozmytej zamiast ostrych warunków
 
 Usage:
-    python random_agent.py --port 8001
+    python final_agent.py --port 8001
     
 To run multiple agents:
-    python random_agent.py --port 8001  # Tank 1
-    python random_agent.py --port 8002  # Tank 2
+    python final_agent.py --port 8001  # Tank 1
+    python final_agent.py --port 8002  # Tank 2
     ...
 """
 
@@ -34,6 +35,9 @@ from fastapi import FastAPI, Body
 from pydantic import BaseModel
 import uvicorn
 
+# Import fuzzy controller
+from fuzzy_controller import FuzzyMotionController
+
 
 # ============================================================================
 # ACTION COMMAND MODEL
@@ -49,28 +53,25 @@ class ActionCommand(BaseModel):
 
 
 # ============================================================================
-# RANDOM AGENT LOGIC
+# FUZZY LOGIC AGENT
 # ============================================================================
 
-class RandomAgent:
+class FuzzyAgent:
     """
-    Agent with more structured, stateful behavior for testing purposes.
-    Drives in one direction for a while, then changes.
-    Scans with its turret.
+    Agent używający logiki rozmytej (fuzzy logic) do podejmowania decyzji.
+    
+    - Ruch czołgu kontrolowany przez FuzzyMotionController
+    - Proste skanowanie celu lufą
+    - Inteligentne decyzje na podstawie odległości wroga i HP
     """
     
-    def __init__(self, name: str = "TestBot"):
+    def __init__(self, name: str = "FuzzyBot"):
         self.name = name
         self.is_destroyed = False
-        print(f"[{self.name}] Agent initialized")
+        print(f"[{self.name}] Agent inicjalizowany...")
 
-        # State for movement
-        self.move_timer = 0
-        self.current_move_speed = 0.0
-
-        # State for hull rotation
-        self.heading_timer = 0
-        self.current_heading_rotation = 0.0
+        # Fuzzy controller dla ruchu
+        self.motion_controller = FuzzyMotionController()
 
         # State for barrel scanning
         self.barrel_scan_direction = 1.0  # 1.0 for right, -1.0 for left
@@ -78,6 +79,8 @@ class RandomAgent:
 
         # State for aiming before shooting
         self.aim_timer = 0  # Ticks to wait before firing
+        
+        print(f"[{self.name}] ✓ Agent gotowy!")
     
     def get_action(
         self, 
@@ -86,56 +89,72 @@ class RandomAgent:
         sensor_data: Dict[str, Any], 
         enemies_remaining: int
     ) -> ActionCommand:
-        """Generate a stateful, predictable action for testing."""
+        """Główna metoda - podejmij decyzję na podstawie fuzzy logic."""
         should_fire = False
-        heading_rotation = 0.0
         barrel_rotation = 0.0
         
+        # ===================================================================
+        # WYCIĄGNIJ DANE O CZOŁGU
+        # ===================================================================
+        
+        # Pozycja
+        pos = my_tank_status.get('position', {})
+        if isinstance(pos, dict):
+            my_x = pos.get('x', 0.0)
+            my_y = pos.get('y', 0.0)
+        else:
+            my_x = getattr(pos, 'x', 0.0)
+            my_y = getattr(pos, 'y', 0.0)
+        
+        my_position = (my_x, my_y)
+        my_heading = my_tank_status.get('heading', 0.0)
+        my_hp = my_tank_status.get('hp', 100)
+        max_hp = my_tank_status.get('_max_hp', 100)
+        barrel_angle = my_tank_status.get('barrel_angle', 0.0)
+        
+        # ===================================================================
+        # FUZZY LOGIC MOTION CONTROL
+        # ===================================================================
+        
+        heading_rotation, move_speed = self.motion_controller.compute_motion(
+            my_position=my_position,
+            my_heading=my_heading,
+            my_hp=my_hp,
+            max_hp=max_hp,
+            sensor_data=sensor_data
+        )
+        
+        # ===================================================================
+        # BARREL SCANNING (skanuj celem w poszukiwaniu wroga)
+        # ===================================================================
+        
         if self.aim_timer > 0:
-            # --- AIMING PHASE ---
+            # Celujemy - nie ruszaj lufą
             self.aim_timer -= 1
-            
-            # Stop all rotation while aiming
-            heading_rotation = 0.0
             barrel_rotation = 0.0
             
-            # Fire on the last tick of aiming
+            # Strzel na końcu celowania
             if self.aim_timer == 0:
                 should_fire = True
         else:
-            # --- NORMAL OPERATION PHASE ---
-
-            # --- Hull Rotation Logic ---
-            self.heading_timer -= 1
-            if self.heading_timer <= 0:
-                self.current_heading_rotation = random.choice([-15.0, 0, 15.0])
-                self.heading_timer = random.randint(30, 90)
-            heading_rotation = self.current_heading_rotation
-
-            # --- Barrel Scanning Logic ---
-            barrel_angle = my_tank_status.get("barrel_angle", 0.0)
+            # Skanuj lufą w lewo-prawo
             if barrel_angle > 45.0:
                 self.barrel_scan_direction = -1.0  # Scan left
             elif barrel_angle < -45.0:
                 self.barrel_scan_direction = 1.0  # Scan right
             barrel_rotation = self.barrel_rotation_speed * self.barrel_scan_direction
-
-            # --- Shooting Decision ---
-            # Decide if we should start aiming
-            wants_to_shoot = random.random() < 0.3
-            if wants_to_shoot:
-                self.aim_timer = 10  # Start aiming for 10 ticks
-
-        # --- Movement Logic (independent of aiming) ---
-        self.move_timer -= 1
-        if self.move_timer <= 0:
-            self.current_move_speed = random.choice([30.0, 30.0, 0.0, -10.0])
-            self.move_timer = random.randint(1, 10)
+            
+            # Jeśli widzimy wroga - zacznij celować
+            seen_tanks = sensor_data.get('seen_tanks', [])
+            if seen_tanks and len(seen_tanks) > 0:
+                # Wróg w zasięgu - przygotuj się do strzału
+                if random.random() < 0.2:  # 20% szansy na rozpoczęcie celowania
+                    self.aim_timer = 5  # Celuj przez 5 ticków
         
         return ActionCommand(
             barrel_rotation_angle=barrel_rotation,
             heading_rotation_angle=heading_rotation,
-            move_speed=self.current_move_speed,
+            move_speed=move_speed,
             should_fire=should_fire
         )
     
@@ -156,13 +175,13 @@ class RandomAgent:
 # ============================================================================
 
 app = FastAPI(
-    title="Random Test Agent",
-    description="Random walking and shooting agent for testing",
+    title="Fuzzy Logic Tank Agent",
+    description="Intelligent tank agent using fuzzy logic for decision making",
     version="1.0.0"
 )
 
 # Global agent instance
-agent = RandomAgent()
+agent = FuzzyAgent()
 
 
 @app.get("/")
@@ -202,7 +221,7 @@ async def end(payload: Dict[str, Any] = Body(...)):
 # ============================================================================
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run random test agent")
+    parser = argparse.ArgumentParser(description="Run fuzzy logic tank agent")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Host address")
     parser.add_argument("--port", type=int, default=8001, help="Port number")
     parser.add_argument("--name", type=str, default=None, help="Agent name")
@@ -211,7 +230,7 @@ if __name__ == "__main__":
     if args.name:
         agent.name = args.name
     else:
-        agent.name = f"RandomBot_{args.port}"
+        agent.name = f"FuzzyBot_{args.port}"
     
     print(f"Starting {agent.name} on {args.host}:{args.port}")
     uvicorn.run(app, host=args.host, port=args.port)
