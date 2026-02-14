@@ -299,7 +299,8 @@ class FuzzyTurretController:
             self.rotation_speed_sim.input["angle_error"] = min(abs(angle_error), 180)
             self.rotation_speed_sim.input["target_distance"] = min(distance, 150)
             self.rotation_speed_sim.compute()
-            return self.rotation_speed_sim.output["speed_factor"]
+            # cast to native float (skfuzzy may return numpy scalar)
+            return float(self.rotation_speed_sim.output["speed_factor"])
         except Exception:
             if abs(angle_error) < 5:
                 return 0.2
@@ -330,9 +331,10 @@ class FuzzyTurretController:
             self.firing_decision_sim.compute()
 
             fire_confidence = self.firing_decision_sim.output["fire_confidence"]
-            return fire_confidence >= FIRE_CONFIDENCE_THRESHOLD
+            # Ensure native Python bool to avoid numpy.bool_ in tests
+            return bool(fire_confidence >= FIRE_CONFIDENCE_THRESHOLD)
         except Exception:
-            return abs(angle_error) <= self.aim_threshold
+            return bool(abs(angle_error) <= self.aim_threshold)
 
     def _adaptive_scan(
         self,
@@ -354,7 +356,7 @@ class FuzzyTurretController:
             self.adaptive_scan_sim.input["scan_error"] = min(scan_direction_error, 180)
             self.adaptive_scan_sim.compute()
 
-            speed_factor = self.adaptive_scan_sim.output["scan_speed"]
+            speed_factor = float(self.adaptive_scan_sim.output["scan_speed"])
 
             if self.last_seen_direction is not None and scan_direction_error > 15:
                 direction_diff = normalize_angle_diff(
@@ -364,9 +366,9 @@ class FuzzyTurretController:
             else:
                 rotation = speed_factor * max_rotation * 0.5
 
-            return max(-max_rotation, min(max_rotation, rotation))
+            return float(max(-max_rotation, min(max_rotation, rotation)))
         except Exception:
-            return max(-max_rotation, min(max_rotation, 22.0))
+            return float(max(-max_rotation, min(max_rotation, 22.0)))
 
     def update(
         self,
@@ -418,4 +420,5 @@ class FuzzyTurretController:
         if should_fire:
             self.cooldown_ticks = COOLDOWN_TICKS
 
-        return rotation, should_fire
+        # Ensure native python return types to avoid numpy scalar leakage
+        return float(rotation), bool(should_fire)

@@ -90,6 +90,11 @@ class SmartAgent:
                 danger_boost = 2.5 if ("water" in terrain_type or "pothole" in terrain_type) else 1.3
                 state.danger += danger_boost
                 state.blocked += 0.25
+                # Mark neighbouring cells as slightly more dangerous so planner avoids
+                for nx, ny in ((cell[0]+1, cell[1]), (cell[0]-1, cell[1]), (cell[0], cell[1]+1), (cell[0], cell[1]-1)):
+                    nstate = self.model.get_state((nx, ny))
+                    nstate.danger += 0.6
+                    nstate.blocked += 0.12
             else:
                 state.safe += 0.35
 
@@ -219,8 +224,28 @@ class SmartAgent:
         my_x: float,
         my_y: float,
     ) -> bool:
-        if standing_on_danger or enemies_visible or stuck_triggered:
+        # Immediate danger / stuck are always important
+        if standing_on_danger or stuck_triggered:
             return True
+
+        # Treat visible enemies as important only when not in an explore route-commit
+        # or when they are very close / multiple. This lets an exploring agent "spot"
+        # enemies without immediately switching to full attack (reduces accidental fights).
+        if enemies_visible:
+            ENGAGE_VISIBLE_DISTANCE = 6.0  # very close => treat as immediate threat
+            close_enemies = 0
+            for t in sensor.get("seen_tanks", []):
+                tx, ty = self._xy(t.get("position", t.get("_position", {}))) if isinstance(t, dict) else (getattr(t, "position").x, getattr(t, "position").y)
+                if euclidean_distance(my_x, my_y, tx, ty) <= ENGAGE_VISIBLE_DISTANCE:
+                    close_enemies += 1
+            # If agent is currently committed to explore, ignore distant sightings
+            if self.route_commit_mode and "explore" in self.route_commit_mode:
+                if close_enemies >= 1:
+                    return True
+            else:
+                # not exploring -> any visible enemy is important
+                return True
+
         if hp_lost > 0.35:
             return True
 
@@ -235,9 +260,11 @@ class SmartAgent:
         return False
 
     def _begin_route_commit(self, tick: int, goal_mode: str) -> None:
+        # Keep a longer route-commit for exploration/control lanes so agent doesn't
+        # constantly replan and oscillate — interruption still happens on danger/events.
         duration = 42
         if goal_mode in ("explore", "control_lane"):
-            duration = 68
+            duration = 120  # longer commitment for smooth exploration
         elif goal_mode in ("collect_powerup", "collect_medkit", "pickup_now"):
             duration = 32
         elif goal_mode in ("attack", "attack_standoff"):
@@ -373,13 +400,21 @@ class SmartAgent:
         best = (base_turn, base_speed)
         best_score = base_risk
 
+        HYSTERESIS = 0.12  # require noticeable improvement to switch to a different maneuver
+
         for t_off in turn_offsets:
             candidate_turn = self._clamp(base_turn + t_off, -max_heading, max_heading)
             for scale in speed_scales:
                 candidate_speed = self._clamp(base_speed * scale, -top_speed, top_speed)
                 risk = self._movement_risk_score(my_x, my_y, my_heading, candidate_turn, candidate_speed, sensor)
-                score = risk + 0.018 * abs(candidate_turn - base_turn) + 0.22 * abs(candidate_speed - base_speed) - 0.07 * max(0.0, candidate_speed)
-                if score < best_score:
+                score = (
+                    risk
+                    + 0.018 * abs(candidate_turn - base_turn)
+                    + 0.22 * abs(candidate_speed - base_speed)
+                    - 0.07 * max(0.0, candidate_speed)
+                )
+                # adopt candidate only if it's clearly better than current best (hysteresis)
+                if score < best_score - HYSTERESIS:
                     best_score = score
                     best = (candidate_turn, candidate_speed)
 
@@ -659,6 +694,28 @@ class SmartAgent:
             seen_tanks=sensor.get("seen_tanks", []),
             max_barrel_rotation=max_barrel,
         )
+
+        # Policy change: do not fire while exploring/controlling lanes — only in attack modes
+        # or when an enemy is dangerously close (self-defense). This makes agents search
+        # for enemies without accidentally killing while casually exploring the map.
+        is_exploring_mode = (
+            (mode is not None and ("explore" in mode or "control_lane" in mode or "local_probe" in mode))
+            or (self.route_commit_mode and ("explore" in self.route_commit_mode or "control_lane" in self.route_commit_mode))
+        )
+
+        if is_exploring_mode:
+            # allow firing only in immediate self-defence (very close enemy)
+            closest_dist = None
+            for t in sensor.get("seen_tanks", []):
+                tx, ty = self._xy(t.get("position", t.get("_position", {}))) if isinstance(t, dict) else (getattr(t, "position").x, getattr(t, "position").y)
+                d = euclidean_distance(my_x, my_y, tx, ty)
+                if closest_dist is None or d < closest_dist:
+                    closest_dist = d
+            # threshold for defensive fire (units)
+            # use a stricter threshold so "explore" mode does not permit shooting at mid-range
+            DEFENSIVE_FIRE_DISTANCE = 8.0
+            if closest_dist is None or closest_dist > DEFENSIVE_FIRE_DISTANCE:
+                should_fire = False
 
         turn, speed = self._self_preserving_command(
             my_x=my_x,

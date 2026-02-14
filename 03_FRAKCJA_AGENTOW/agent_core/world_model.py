@@ -83,6 +83,11 @@ class WorldModel:
         visits = float(self.visit_counts.get(cell, 0))
         local_pressure = self.local_block_pressure(cell)
         base = 1.9
+
+        # Unknown-cell penalty: prefer known safe ground over unexplored tiles.
+        if cell not in self.cell_states:
+            base += 2.8  # treat unknown as risky (discourage A* from using it)
+
         base -= 0.35 * min(state.safe, 3.0)
         base += 4.8 * state.danger
         base += 7.2 * state.blocked

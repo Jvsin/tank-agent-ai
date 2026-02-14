@@ -64,18 +64,34 @@ class MotionDriver:
         if not self.path:
             return 0.0, max(0.7, top_speed * 0.58)
 
+        next_cell = self.path[0]
+
+        # If next cell is known to be dangerous, prefer a safe immediate neighbor instead
+        if self.world_model.is_dangerous_cell(next_cell):
+            my_cell = self.world_model.to_cell(my_x, my_y)
+            safe_neighbor = self.best_immediate_safe_neighbor(my_cell)
+            if safe_neighbor is not None and safe_neighbor != my_cell:
+                return self.drive_to_cell(my_x, my_y, my_heading, safe_neighbor, top_speed)
+            # otherwise slow down and continue (fallback below)
+
         wx, wy = self.world_model.to_world_center(self.path[0])
         target_angle = heading_to_angle_deg(my_x, my_y, wx, wy)
         diff = normalize_angle_diff(target_angle, my_heading)
 
         abs_diff = abs(diff)
-        turn_limit = 13.0 if abs_diff <= 20.0 else 18.0
-        turn = max(-turn_limit, min(turn_limit, diff))
 
+        # Deadband for very small heading errors to avoid micro-corrections (reduces dithering)
+        if abs_diff < 4.0:
+            turn = 0.0
+        else:
+            turn_limit = 13.0 if abs_diff <= 20.0 else 18.0
+            turn = max(-turn_limit, min(turn_limit, diff))
+
+        # Keep speed higher for moderate heading errors to prefer forward motion over frequent stop/turn
         if abs_diff > 55.0:
-            speed = top_speed * 0.42
+            speed = top_speed * 0.60
         elif abs_diff > 24.0:
-            speed = top_speed * 0.68
+            speed = top_speed * 0.82
         else:
             speed = top_speed
         return turn, speed
