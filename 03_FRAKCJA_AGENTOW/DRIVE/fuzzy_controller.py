@@ -91,8 +91,8 @@ class FuzzyMotionController:
         # --- Prędkość (wyjście) ---
         self.target_speed['fast_reverse'] = fuzz.trimf(self.target_speed.universe, [-50, -40, -20])
         self.target_speed['slow_reverse'] = fuzz.trimf(self.target_speed.universe, [-30, -15, 0])
-        self.target_speed['stop'] = fuzz.trimf(self.target_speed.universe, [-10, 0, 10])
-        self.target_speed['slow_forward'] = fuzz.trimf(self.target_speed.universe, [0, 15, 30])
+        self.target_speed['stop'] = fuzz.trimf(self.target_speed.universe, [-5, 0, 5])  # Wąski zakres!
+        self.target_speed['slow_forward'] = fuzz.trimf(self.target_speed.universe, [5, 18, 32])  # Uniesiony od 0
         self.target_speed['fast_forward'] = fuzz.trimf(self.target_speed.universe, [25, 40, 50])
         
         # --- Skręt w stronę wroga (wyjście) ---
@@ -328,14 +328,24 @@ class FuzzyMotionController:
                 heading_rotation = 0.0
             
             move_speed = speed_output
-            # Jeśli mamy wroga i stoimy w miejscu bez powodu, wymuś wolny ruch do przodu
-            if abs(move_speed) < 8.0 and hp_percent > 40.0 and closest_enemy_dist > 8.0:
-                move_speed = 12.0
+            
+            # ZAWSZE JAKIŚ SENSOWNY RUCH - nie stój w miejscu!
+            # Wyjątek: celowanie do wroga z bliska (można stanąć i celować)
+            can_stand_still = (closest_enemy_dist < 30.0 and hp_percent > 30.0)
+            
+            if abs(move_speed) < 5.0 and not can_stand_still:
+                # Brak sensownej prędkości i nie celujemy - jedź do przodu eksplorując
+                move_speed = 20.0
+                if obstacle_dist < 15.0:
+                    # Przeszkoda przed nami - jedź wolniej
+                    move_speed = 12.0
+            
             # Ogranicz przypadkowe cofanie, gdy nie ma realnej potrzeby odwrotu
             if move_speed < 0:
                 should_retreat = (closest_enemy_dist < 12.0 and hp_percent < 35.0)
                 if not should_retreat and obstacle_dist > 10.0:
-                    move_speed = 10.0
+                    # Nie ma powodu do cofania - jedź do przodu
+                    move_speed = 15.0
         
         return heading_rotation, move_speed
     

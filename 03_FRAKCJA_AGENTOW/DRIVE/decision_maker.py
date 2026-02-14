@@ -71,10 +71,10 @@ class DecisionMaker:
         my_heading: float = 0.0
     ) -> Optional[Tuple[bool, float, float]]:
         """
-        Sprawdź czy jesteśmy na szkodliwym terenie i znajdź bezpieczne wyjście.
+        ULTRA PROSTA logika omijania WIDZIANYCH szkodliwych terenów.
         
-        Strategia: Szukaj BEZPIECZNEGO terenu (0 DMG) i jedź tam, nawet jeśli
-        trzeba przejść przez mniej szkodliwy teren (np. dziury).
+        Jeśli widzisz szkodliwy teren PRZED SOBĄ - skręć od niego.
+        Nie próbuj uciekać globalnie, tylko omijaj lokalne zagrożenia.
         
         Args:
             my_x, my_y: Pozycja czołgu
@@ -86,86 +86,65 @@ class DecisionMaker:
         """
         seen_terrains = sensor_data.get('seen_terrains', [])
         
-        # Sklasyfikuj tereny na: szkodliwe (blisko nas) i bezpieczne
-        nearby_damaging = []  # Szkodliwe tereny w radius < 8m
-        safe_terrains = []     # Bezpieczne tereny w radius < 40m
+        # Znajdź szkodliwe tereny PRZED NAMI (±60°, do 20m)
+        dangerous_ahead = []
         
         for terrain in seen_terrains:
-            # Pozycja terenu
             terrain_pos = terrain.get('position', terrain.get('_position', {}))
             if isinstance(terrain_pos, dict):
                 tx, ty = terrain_pos.get('x', 0), terrain_pos.get('y', 0)
             else:
                 tx, ty = getattr(terrain_pos, 'x', 0), getattr(terrain_pos, 'y', 0)
             
-            # Odległość do terenu
             dist = distance_2d(my_x, my_y, tx, ty)
             
-            # Czy teren zadaje obrażenia?
+            # Zbyt daleko? Ignoruj
+            if dist > 20.0:
+                continue
+            
             deal_damage = terrain.get('dmg', terrain.get('_deal_damage', 0))
             if isinstance(deal_damage, property):
                 deal_damage = terrain.get('deal_damage', 0)
             
-            # Klasyfikuj
-            if deal_damage > 0 and dist < 8.0:
-                angle = angle_to_target(my_x, my_y, tx, ty)
-                nearby_damaging.append((tx, ty, angle, dist, deal_damage))
-            elif deal_damage == 0 and dist < 40.0:
-                angle = angle_to_target(my_x, my_y, tx, ty)
-                safe_terrains.append((tx, ty, angle, dist))
+            # Szkodliwy?
+            if deal_damage > 0:
+                # Kąt do terenu
+                angle_to_terrain = angle_to_target(my_x, my_y, tx, ty)
+                angle_diff = normalize_angle_diff(angle_to_terrain - my_heading)
+                
+                # Przed nami? (w stożku ±60°)
+                if abs(angle_diff) < 60:
+                    dangerous_ahead.append((tx, ty, angle_diff, dist, deal_damage))
         
-        # Jeśli nie ma szkodliwego terenu w pobliżu, OK
-        if not nearby_damaging:
+        if not dangerous_ahead:
             return None
         
-        # NAJWAŻNIEJSZE: Znajdź najbliższy bezpieczny teren
-        target_angle = None
+        # Mamy zagrożenie przed sobą! Skręć od niego
+        # Znajdź najbliższe zagrożenie
+        closest = min(dangerous_ahead, key=lambda x: x[3])  # x[3] = dist
+        _, _, angle_to_closest, dist_to_closest, _ = closest
         
-        if safe_terrains:
-            # Mamy widoczny bezpieczny teren! Idź tam!
-            closest_safe = min(safe_terrains, key=lambda x: x[3])  # x[3] = dist
-            target_angle = closest_safe[2]  # x[2] = angle
+        # Skręć w PRZECIWNĄ stronę
+        if angle_to_closest > 0:
+            # Zagrożenie po prawej - skręć w lewo
+            turn = -35.0
         else:
-            # Nie widać bezpiecznego terenu - uciekaj od najbardziej szkodliwych
-            # Sprawdź 8 kierunków i wybierz najlepszy
-            best_escape_angle = None
-            best_score = -999999
-            
-            for check_angle in range(0, 360, 45):
-                score = 0
-                for tx, ty, danger_angle, danger_dist, damage in nearby_damaging:
-                    # Jak bardzo ten kierunek prowadzi OD niebezpieczeństwa?
-                    angle_diff = normalize_angle_diff(check_angle - danger_angle)
-                    # cos(0°)=-1 (towards), cos(180°)=+1 (away)
-                    direction_score = math.cos(math.radians(angle_diff))
-                    
-                    # Waga: bliższe i bardziej szkodliwe = ważniejsze
-                    weight = damage / (danger_dist + 0.1)
-                    score += direction_score * weight
-                
-                if score > best_score:
-                    best_score = score
-                    best_escape_angle = check_angle
-            
-            target_angle = best_escape_angle
+            # Zagrożenie po lewej - skręć w prawo
+            turn = 35.0
         
-        # Oblicz jak bardzo musimy się obrócić do celu
-        if target_angle is not None:
-            angle_diff = normalize_angle_diff(target_angle - my_heading)
-            
-            # Jeśli musimy się mocno obrócić (> 90°), cofaj się podczas obrotu
-            if abs(angle_diff) > 90:
-                heading_rot = 45.0 if angle_diff > 0 else -45.0
-                return (True, heading_rot, -15.0)
-            else:
-                # Obróć się i jedź SZYBKO do bezpieczeństwa!
-                heading_rot = max(-45.0, min(45.0, angle_diff))
-                # Im lepiej wycelowany, tym szybciej jedź
-                speed = 35.0 if abs(angle_diff) < 30 else 25.0
-                return (True, heading_rot, speed)
+        # Im bliżej, tym wolniej jedź (lub się zatrzymaj)
+        if dist_to_closest < 8:
+            speed = 10.0  # Bardzo blisko - wolno
+        elif dist_to_closest < 15:
+            speed = 20.0  # Średnio blisko
+        else:
+            speed = 30.0  # Daleko - normalnie
         
-        # Fallback - nie powinno się zdarzyć
-        return (True, 0.0, -30.0)
+        import random
+        if random.random() < 0.03:
+            print(f"[TERRAIN] Omijam szkodliwy teren {dist_to_closest:.1f}m z {angle_to_closest:.0f}° - skręcam {turn:.0f}°")
+        
+        return (True, turn, speed)
     
     # =======================================================================
     # REGUŁA 2: KOLIZJA Z PRZESZKODĄ (PRIORYTET 99)

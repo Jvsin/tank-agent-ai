@@ -38,6 +38,7 @@ import random
 
 # Import modułów jazdy z DRIVE
 from DRIVE import DecisionMaker, FuzzyMotionController
+from DRIVE.barrel_controller import BarrelController, BarrelMode
 
 
 # ============================================================================
@@ -53,7 +54,7 @@ class ActionCommand(BaseModel):
     should_fire: bool = False
 
 
-ACTION_LOG_EVERY = 1
+ACTION_LOG_EVERY = 60  # Globalna stała - log co 60 ticków (1 sekunda)
 
 
 class FuzzyAgent:
@@ -76,14 +77,21 @@ class FuzzyAgent:
         # Decision maker (hierarchia priorytetów)
         self.decision_maker = DecisionMaker()
 
-        # State for barrel scanning
-        self.barrel_scan_direction = 1.0  # 1.0 for right, -1.0 for left
-        self.barrel_rotation_speed = 15.0
-
-        # State for aiming before shooting
-        self.aim_timer = 0  # Ticks to wait before firing
+        # Barrel controller - ciągłe skanowanie 360° jak wiatrak
+        self.barrel_controller = BarrelController(
+            scan_speed=20.0,      # Szybkie skanowanie (silnik ograniczy do ~1.5°/tick)
+            track_speed=35.0,     # Bardzo szybkie śledzenie wroga
+            aim_threshold=3.0,    # Celuj z dokładnością ±3°
+            aim_ticks=2,          # Celuj przez 2 ticki przed strzałem
+            fire_cooldown=15      # 15 ticków między strzałami
+        )
         
-        print(f"[{self.name}] ✓ Agent gotowy z hierarchią decyzji!")
+        # Stan HP do wykrywania obrażeń od terenu
+        self.last_hp = None
+        self.damage_taken_recently = 0
+        self.escape_direction = None  # Kierunek ucieczki gdy na szkodliwym terenie
+        
+        print(f"[{self.name}] ✓ Agent gotowy - prosta i skuteczna logika!")
     
     def get_action(
         self, 
@@ -101,8 +109,8 @@ class FuzzyAgent:
         3. Powerup w pobliżu (jeśli brak wrogów)
         4. Fuzzy logic (walka/eksploracja)
         """
-        ACTION_LOG_EVERY = 1
-        REQUEST_LOG_EVERY = 30
+        ACTION_LOG_EVERY = 60  # Zmniejszony spam - log co sekundę
+        REQUEST_LOG_EVERY = 120  # Jeszcze rzadziej
         
         def clamp(value: float, min_value: float, max_value: float) -> float:
             return max(min_value, min(value, max_value))
@@ -147,6 +155,43 @@ class FuzzyAgent:
             ]
         else:
             filtered_sensor_data['seen_tanks'] = seen_tanks
+        
+        # ===================================================================
+        # DETEKCJA SZKODLIWEGO TERENU - Po stracie HP
+        # ===================================================================
+        # NAJPROSTSZE: Jeśli tracimy HP bez wroga = zawróć i uciekaj!
+        is_escaping_damage = False
+        
+        if self.last_hp is not None:
+            hp_lost = self.last_hp - my_hp
+            if hp_lost > 0.5:  # Tracisz co najmniej 0.5 HP
+                # Tracimy HP!
+                if len(filtered_sensor_data.get('seen_tanks', [])) == 0:
+                    # Brak wrogów - teren nas zabija!
+                    self.damage_taken_recently = 60  # Pamiętaj przez sekundę
+                    
+                    # Wybierz kierunek ucieczki TYLKO RAZ gdy wykrywasz szkodę
+                    if self.escape_direction is None:
+                        # Zawróć: obróć się o 120-180° (losowo żeby nie zawracać w to samo miejsce)
+                        import random
+                        turn_amount = random.choice([120, 135, 150, 165, 180, -120, -135, -150, -165, -180])
+                        self.escape_direction = (my_heading + turn_amount) % 360
+                        print(f"[{self.name}] 🚨 SZKODLIWY TEREN! HP {my_hp:.1f} (strata {hp_lost:.1f}) - Zawracam o {turn_amount}°!")
+        
+        self.last_hp = my_hp
+        
+        # Czy uciekamy?
+        if self.damage_taken_recently > 0:
+            self.damage_taken_recently -= 1
+            is_escaping_damage = True
+            
+            # Jak HP wraca do normy, resetuj
+            if my_hp > 0.8 * max_hp and self.damage_taken_recently < 20:
+                self.escape_direction = None
+                self.damage_taken_recently = 0
+                is_escaping_damage = False
+        else:
+            self.escape_direction = None
 
         # ===================================================================
         # HIERARCHIA DECYZJI (PRIORYTET OD NAJWYŻSZEGO)
@@ -157,11 +202,30 @@ class FuzzyAgent:
         decision_source = "none"
         
         try:
-            # --- PRIORYTET 1: SZKODLIWY TEREN ---
-            result = self.decision_maker.check_damaging_terrain(my_x, my_y, filtered_sensor_data, my_heading)
-            if result:
-                _, heading_rotation, move_speed = result
-                decision_source = "damaging_terrain"
+            # --- PRIORYTET 0: UCIECZKA Z SZKODLIWEGO TERENU (NAJWYŻSZY!) ---
+            if is_escaping_damage and self.escape_direction is not None:
+                # Jedź w wybranym kierunku ucieczki pełną prędkością
+                angle_diff = (self.escape_direction - my_heading + 360) % 360
+                if angle_diff > 180:
+                    angle_diff -= 360
+                
+                # Obróć się w stronę ucieczki
+                heading_rotation = max(-45.0, min(45.0, angle_diff))
+                move_speed = 40.0  # MAKSYMALNA PRĘDKOŚĆ!
+                decision_source = "EMERGENCY_ESCAPE"
+                result = True
+                
+                if current_tick % 30 == 0:
+                    print(f"[{self.name}] 🏃 UCIECZKA! Kierunek {self.escape_direction:.0f}°, HP {my_hp:.1f}/{max_hp:.1f}")
+            else:
+                result = None
+            
+            # --- PRIORYTET 1: SZKODLIWY TEREN (tylko z vision API) ---
+            if not result:
+                result = self.decision_maker.check_damaging_terrain(my_x, my_y, filtered_sensor_data, my_heading)
+                if result:
+                    _, heading_rotation, move_speed = result
+                    decision_source = "damaging_terrain"
             
             # --- PRIORYTET 2: KOLIZJA Z PRZESZKODĄ ---
             if not result:
@@ -202,38 +266,25 @@ class FuzzyAgent:
         
         # Debug info (opcjonalnie)
         if ACTION_LOG_EVERY > 0 and current_tick % ACTION_LOG_EVERY == 0:
+            barrel_status = self.barrel_controller.get_status()
             print(
                 f"[{self.name}] Tick {current_tick}: Decision={decision_source}, "
-                f"Speed={move_speed:.2f}, Turn={heading_rotation:.2f}, Barrel={barrel_rotation:.2f}"
+                f"Speed={move_speed:.2f}, Turn={heading_rotation:.2f}, Barrel={barrel_status}"
             )
         
         # ===================================================================
-        # BARREL SCANNING & SHOOTING
+        # BARREL CONTROLLER - SKANOWANIE 360° ORAZ CELOWANIE I STRZELANIE
         # ===================================================================
         
-        if self.aim_timer > 0:
-            # Celujemy - nie ruszaj lufą
-            self.aim_timer -= 1
-            barrel_rotation = 0.0
-            
-            # Strzel na końcu celowania
-            if self.aim_timer == 0:
-                should_fire = True
-        else:
-            # Skanuj lufą w lewo-prawo
-            if barrel_angle > 45.0:
-                self.barrel_scan_direction = -1.0
-            elif barrel_angle < -45.0:
-                self.barrel_scan_direction = 1.0
-            barrel_step = min(self.barrel_rotation_speed, max_barrel)
-            barrel_rotation = barrel_step * self.barrel_scan_direction
-            
-            # Jeśli widzimy wroga - zacznij celować
-            seen_tanks = filtered_sensor_data.get('seen_tanks', [])
-            if seen_tanks and len(seen_tanks) > 0:
-                # Wróg w zasięgu - przygotuj się do strzału
-                if random.random() < 0.2:  # 20% szansy
-                    self.aim_timer = 5
+        # Użyj inteligentnego sterownika lufy
+        barrel_rotation, should_fire = self.barrel_controller.update(
+            my_x=my_x,
+            my_y=my_y,
+            my_heading=my_heading,
+            current_barrel_angle=barrel_angle,
+            seen_tanks=filtered_sensor_data.get('seen_tanks', []),
+            max_barrel_rotation=max_barrel
+        )
         
         return ActionCommand(
             barrel_rotation_angle=clamp(barrel_rotation, -max_barrel, max_barrel),
