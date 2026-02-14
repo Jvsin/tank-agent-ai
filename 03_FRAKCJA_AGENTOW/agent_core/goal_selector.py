@@ -158,7 +158,7 @@ class GoalSelector:
             if safe:
                 return Goal(safe, "low_hp_safe", 850.0)
 
-        if enemy_cells and hp_ratio >= 0.58:
+        if enemy_cells and hp_ratio >= 0.50:
             enemy_cells.sort(key=lambda cell: abs(cell[0] - my_cell[0]) + abs(cell[1] - my_cell[1]))
             standoff = self._choose_attack_standoff(my_cell, enemy_cells[0])
             if standoff is not None:

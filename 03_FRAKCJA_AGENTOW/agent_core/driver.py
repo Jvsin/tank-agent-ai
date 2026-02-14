@@ -43,32 +43,41 @@ class MotionDriver:
     def drive_to_point(self, my_x: float, my_y: float, my_heading: float, tx: float, ty: float, top_speed: float) -> Tuple[float, float]:
         target_angle = heading_to_angle_deg(my_x, my_y, tx, ty)
         diff = normalize_angle_diff(target_angle, my_heading)
-        turn = max(-18.0, min(18.0, diff))
+        abs_diff = abs(diff)
+        if abs_diff <= 18.0:
+            turn_limit = 10.0
+        elif abs_diff <= 45.0:
+            turn_limit = 16.0
+        else:
+            turn_limit = 22.0
+        turn = max(-turn_limit, min(turn_limit, diff))
 
-        if abs(diff) > 45:
-            speed = top_speed * 0.25
-        elif abs(diff) > 20:
-            speed = top_speed * 0.55
+        if abs_diff > 60.0:
+            speed = top_speed * 0.50
+        elif abs_diff > 30.0:
+            speed = top_speed * 0.76
         else:
             speed = top_speed
         return turn, speed
 
     def drive_path(self, my_x: float, my_y: float, my_heading: float, top_speed: float) -> Tuple[float, float]:
         if not self.path:
-            return 0.0, max(0.4, top_speed * 0.35)
+            return 0.0, max(0.7, top_speed * 0.58)
 
         wx, wy = self.world_model.to_world_center(self.path[0])
         target_angle = heading_to_angle_deg(my_x, my_y, wx, wy)
         diff = normalize_angle_diff(target_angle, my_heading)
 
-        turn = max(-15.0, min(15.0, diff))
+        abs_diff = abs(diff)
+        turn_limit = 13.0 if abs_diff <= 20.0 else 18.0
+        turn = max(-turn_limit, min(turn_limit, diff))
 
-        if abs(diff) > 45:
-            speed = top_speed * 0.2
-        elif abs(diff) > 20:
-            speed = top_speed * 0.45
+        if abs_diff > 55.0:
+            speed = top_speed * 0.42
+        elif abs_diff > 24.0:
+            speed = top_speed * 0.68
         else:
-            speed = top_speed * 0.9
+            speed = top_speed
         return turn, speed
 
     def update_stuck(self, my_x: float, my_y: float, enemies_visible: bool, heading: float) -> bool:

@@ -43,6 +43,8 @@ def run_test(ticks: int = 180) -> int:
 
     move_ticks = 0
     spin_ticks = 0
+    direction_flips = 0
+    last_turn_sign = 0
 
     for tick in range(1, ticks + 1):
         action = agent.get_action(
@@ -57,6 +59,12 @@ def run_test(ticks: int = 180) -> int:
         if abs(action.heading_rotation_angle) > 20.0:
             spin_ticks += 1
 
+        if abs(action.heading_rotation_angle) >= 2.0:
+            current_sign = 1 if action.heading_rotation_angle > 0 else -1
+            if last_turn_sign != 0 and current_sign != last_turn_sign:
+                direction_flips += 1
+            last_turn_sign = current_sign
+
         # uproszczona aktualizacja pozycji/heading dla kolejnego ticku
         my_status["heading"] = (my_status["heading"] + action.heading_rotation_angle) % 360
         if abs(action.move_speed) > 0.01:
@@ -69,8 +77,13 @@ def run_test(ticks: int = 180) -> int:
 
     move_ratio = move_ticks / ticks
     spin_ratio = spin_ticks / ticks
+    flips_per_minute_equiv = direction_flips * (60.0 / max(1.0, ticks / 60.0))
 
-    print(f"[NO_IDLE] ticks={ticks} move_ticks={move_ticks} move_ratio={move_ratio:.2f} spin_ratio={spin_ratio:.2f}")
+    print(
+        f"[NO_IDLE] ticks={ticks} move_ticks={move_ticks} move_ratio={move_ratio:.2f} "
+        f"spin_ratio={spin_ratio:.2f} direction_flips={direction_flips} "
+        f"flips_per_minute_equiv={flips_per_minute_equiv:.1f}"
+    )
 
     # Agent powinien aktywnie jechać, a nie stać.
     if move_ratio < 0.70:
@@ -80,6 +93,10 @@ def run_test(ticks: int = 180) -> int:
     # Nie powinien stale wykonywać bardzo dużych skrętów.
     if spin_ratio > 0.55:
         print("[NO_IDLE] FAIL: zbyt częste duże skręty")
+        return 1
+
+    if direction_flips > 28:
+        print("[NO_IDLE] FAIL: zbyt częsta zmiana kierunku skrętu (drżenie)")
         return 1
 
     print("[NO_IDLE] PASS")

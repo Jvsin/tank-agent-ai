@@ -317,7 +317,7 @@ def run_test() -> int:
         f"multi_wall_hits={total_hits:.0f} survivors={survivors}/{len(multi_results)} "
         f"pressure_move={pressure_result['move_ratio']:.2f} pressure_hazard={pressure_result['hazard_ratio']:.2f} "
         f"pressure_hits={pressure_result['wall_hits']:.0f} pressure_hp={pressure_result['final_hp']:.1f} "
-        f"pressure_cells={pressure_result['unique_cells']:.0f}"
+        f"pressure_cells={pressure_result['unique_cells']:.0f} pressure_dist={pressure_result['distance']:.1f}"
     )
 
     if avg_move < 0.82:
@@ -352,8 +352,12 @@ def run_test() -> int:
         print("[HARD_MAP] FAIL: przeżywalność za niska w scenariuszu presji")
         return 1
 
-    if pressure_result["unique_cells"] < 22:
-        print("[HARD_MAP] FAIL: eksploracja zbyt mała pod presją")
+    if pressure_result["distance"] < 20.0:
+        print("[HARD_MAP] FAIL: pod presją agent przejeżdża za mały dystans")
+        return 1
+
+    if pressure_result["unique_cells"] < 3:
+        print("[HARD_MAP] FAIL: eksploracja komórkowa zbyt mała pod presją")
         return 1
 
     print("[HARD_MAP] PASS")

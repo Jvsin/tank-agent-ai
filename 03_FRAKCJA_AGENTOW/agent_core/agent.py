@@ -35,6 +35,14 @@ class SmartAgent:
         self.current_goal: Optional[Goal] = None
         self.replan_tick: int = 0
         self.last_hp: Optional[float] = None
+        self.route_commit_until: int = 0
+        self.route_commit_mode: str = ""
+        self.last_danger_mark_tick: int = -9999
+        self.consecutive_danger_ticks: int = 0
+        self.last_cell: Optional[Tuple[int, int]] = None
+        self.last_turn_cmd: float = 0.0
+        self.last_turn_flip_tick: int = -9999
+        self.last_mode: str = "idle"
 
         print(f"[{self.name}] online")
 
@@ -86,10 +94,16 @@ class SmartAgent:
                 state.safe += 0.35
 
     def _standing_on_danger(self, my_x: float, my_y: float, sensor: Dict[str, Any]) -> bool:
-        me = self.model.to_cell(my_x, my_y)
-        if self.model.get_state(me).danger >= 1.0:
+        if self._standing_on_live_hazard(my_x, my_y, sensor):
             return True
 
+        me = self.model.to_cell(my_x, my_y)
+        if self.model.get_state(me).danger >= 2.2:
+            return True
+
+        return False
+
+    def _standing_on_live_hazard(self, my_x: float, my_y: float, sensor: Dict[str, Any]) -> bool:
         for terrain in sensor.get("seen_terrains", []):
             damage = self._terrain_damage(terrain)
             if damage <= 0:
@@ -110,6 +124,20 @@ class SmartAgent:
             if dist < best_distance:
                 best_distance = dist
                 best = (px, py, dist)
+        return best
+
+    def _closest_non_hazard_point(self, my_x: float, my_y: float, sensor: Dict[str, Any]) -> Optional[Tuple[float, float, float]]:
+        best: Optional[Tuple[float, float, float]] = None
+        best_distance = float("inf")
+        for terrain in sensor.get("seen_terrains", []):
+            if self._terrain_damage(terrain) > 0:
+                continue
+            pos = terrain.get("position", terrain.get("_position", {})) if isinstance(terrain, dict) else getattr(terrain, "position", getattr(terrain, "_position", None))
+            tx, ty = self._xy(pos)
+            dist = euclidean_distance(my_x, my_y, tx, ty)
+            if dist < best_distance:
+                best_distance = dist
+                best = (tx, ty, dist)
         return best
 
     def _reactive_obstacle_avoidance(
@@ -168,6 +196,102 @@ class SmartAgent:
                 self.driver.path.pop(0)
             else:
                 break
+
+    def _escape_target_cell(self, my_cell: Tuple[int, int]) -> Optional[Tuple[int, int]]:
+        for radius, require_known in ((10, True), (14, True), (18, False), (24, False)):
+            safe_cell = self.goal_selector.nearest_safe_cell(my_cell, radius=radius, require_known=require_known)
+            if safe_cell is not None and safe_cell != my_cell:
+                return safe_cell
+
+        candidate = self.driver.best_immediate_safe_neighbor(my_cell, allow_risky=True)
+        if candidate is not None and candidate != my_cell:
+            return candidate
+        return None
+
+    def _important_sensor_event(
+        self,
+        *,
+        standing_on_danger: bool,
+        enemies_visible: bool,
+        hp_lost: float,
+        stuck_triggered: bool,
+        sensor: Dict[str, Any],
+        my_x: float,
+        my_y: float,
+    ) -> bool:
+        if standing_on_danger or enemies_visible or stuck_triggered:
+            return True
+        if hp_lost > 0.35:
+            return True
+
+        near_threat = 0
+        for obstacle in sensor.get("seen_obstacles", []):
+            pos = obstacle.get("position", obstacle.get("_position", {})) if isinstance(obstacle, dict) else getattr(obstacle, "position", getattr(obstacle, "_position", None))
+            ox, oy = self._xy(pos)
+            if euclidean_distance(my_x, my_y, ox, oy) <= 14.0:
+                near_threat += 1
+                if near_threat >= 2:
+                    return True
+        return False
+
+    def _begin_route_commit(self, tick: int, goal_mode: str) -> None:
+        duration = 42
+        if goal_mode in ("explore", "control_lane"):
+            duration = 68
+        elif goal_mode in ("collect_powerup", "collect_medkit", "pickup_now"):
+            duration = 32
+        elif goal_mode in ("attack", "attack_standoff"):
+            duration = 24
+        self.route_commit_until = tick + duration
+        self.route_commit_mode = goal_mode
+
+    def _clear_route_commit(self) -> None:
+        self.route_commit_until = 0
+        self.route_commit_mode = ""
+
+    def _local_probe_goal(self, my_cell: Tuple[int, int]) -> Optional[Goal]:
+        best_cell: Optional[Tuple[int, int]] = None
+        best_score = -1e9
+
+        for radius in (1, 2, 3, 4):
+            for dx in range(-radius, radius + 1):
+                for dy in range(-radius, radius + 1):
+                    dist = abs(dx) + abs(dy)
+                    if dist != radius:
+                        continue
+                    cell = (my_cell[0] + dx, my_cell[1] + dy)
+                    if cell == my_cell:
+                        continue
+                    if self.model.is_blocked_for_pathing(cell):
+                        continue
+
+                    was_known = cell in self.model.cell_states
+                    state = self.model.get_state(cell)
+                    visits = self.model.visit_counts.get(cell, 0)
+                    unknown_bonus = 2.4 if not was_known else 0.0
+
+                    score = (
+                        unknown_bonus
+                        + 1.1 * state.safe
+                        - 2.8 * state.danger
+                        - 2.4 * state.blocked
+                        - 0.28 * visits
+                        - 0.14 * dist
+                    )
+                    if score > best_score:
+                        best_score = score
+                        best_cell = cell
+
+            if best_cell is not None:
+                break
+
+        if best_cell is None:
+            fallback = self.driver.best_immediate_safe_neighbor(my_cell, allow_risky=True)
+            if fallback is None:
+                return None
+            best_cell = fallback
+
+        return Goal(best_cell, "local_probe", 260.0)
 
     def _movement_risk_score(
         self,
@@ -263,6 +387,60 @@ class SmartAgent:
             return base_turn, base_speed
         return best
 
+    def _stabilize_direction_and_speed(
+        self,
+        *,
+        current_tick: int,
+        mode: str,
+        standing_on_danger: bool,
+        enemies_visible: bool,
+        my_x: float,
+        my_y: float,
+        my_heading: float,
+        sensor: Dict[str, Any],
+        top_speed: float,
+        turn: float,
+        speed: float,
+    ) -> Tuple[float, float]:
+        stable_mode = (
+            not standing_on_danger
+            and not enemies_visible
+            and not mode.startswith("emergency")
+            and not mode.startswith("avoid")
+            and not mode.startswith("attack")
+        )
+
+        if not stable_mode:
+            self.last_turn_cmd = turn
+            self.last_mode = mode
+            return turn, speed
+
+        previous_turn = self.last_turn_cmd
+        max_turn_delta = 3.6
+        turn = previous_turn + self._clamp(turn - previous_turn, -max_turn_delta, max_turn_delta)
+
+        if abs(turn) < 2.2:
+            turn = 0.0
+
+        sign_changed = (turn > 0 > previous_turn) or (turn < 0 < previous_turn)
+        if sign_changed:
+            if current_tick - self.last_turn_flip_tick < 58 and abs(turn) < 11.0 and abs(previous_turn) > 2.5:
+                turn = math.copysign(max(2.0, abs(turn)), previous_turn)
+            else:
+                self.last_turn_flip_tick = current_tick
+
+        risk = self._movement_risk_score(my_x, my_y, my_heading, turn, speed, sensor)
+        cruise_mode = mode.startswith("route_commit") or mode in ("control_lane", "explore", "local_probe")
+        if cruise_mode and risk < 1.35:
+            if abs(turn) <= 8.0:
+                speed = max(speed, top_speed * 0.86)
+            else:
+                speed = max(speed, top_speed * 0.72)
+
+        self.last_turn_cmd = turn
+        self.last_mode = mode
+        return turn, speed
+
     @staticmethod
     def _clamp(value: float, lo: float, hi: float) -> float:
         return max(lo, min(value, hi))
@@ -307,8 +485,9 @@ class SmartAgent:
         self._update_world(my_x, my_y, sensor)
 
         enemies_visible = len(sensor.get("seen_tanks", [])) > 0
-        self.driver.update_stuck(my_x, my_y, enemies_visible, my_heading)
+        stuck_triggered = self.driver.update_stuck(my_x, my_y, enemies_visible, my_heading)
 
+        hp_lost = 0.0
         if self.last_hp is not None:
             hp_lost = self.last_hp - hp
             if 0.01 < hp_lost <= 12.0 and not enemies_visible:
@@ -319,19 +498,43 @@ class SmartAgent:
         self.last_hp = hp
 
         mode = "idle"
-        if self._standing_on_danger(my_x, my_y, sensor):
+        my_cell = self.model.to_cell(my_x, my_y)
+        if self.last_cell is not None and my_cell != self.last_cell:
+            self.consecutive_danger_ticks = max(0, self.consecutive_danger_ticks - 4)
+
+        standing_on_danger = self._standing_on_danger(my_x, my_y, sensor)
+        if standing_on_danger:
+            self.consecutive_danger_ticks += 1
             cell = self.model.to_cell(my_x, my_y)
             self.model.get_state(cell).danger += 2.0
-            self.model.mark_dead_end(cell, ttl=600.0)
+            if current_tick - self.last_danger_mark_tick >= 18:
+                self.model.mark_dead_end(cell, ttl=460.0)
+                self.last_danger_mark_tick = current_tick
             self.driver.start_escape(my_heading)
+            self._clear_route_commit()
+        else:
+            self.consecutive_danger_ticks = 0
+
+        if (
+            self.driver.escape_ticks > 0
+            and enemies_visible
+            and not self._standing_on_live_hazard(my_x, my_y, sensor)
+            and hp_ratio >= 0.52
+        ):
+            self.driver.escape_ticks = 0
+            self.driver.escape_heading = None
+            self.driver.path = []
+            self.current_goal = None
+            self._clear_route_commit()
+            standing_on_danger = False
 
         if self.driver.escape_ticks > 0:
-            escape_goal_cell = self.goal_selector.nearest_safe_cell(self.model.to_cell(my_x, my_y), radius=12, require_known=True)
+            escape_goal_cell = self._escape_target_cell(my_cell)
             if escape_goal_cell is not None and escape_goal_cell != self.model.to_cell(my_x, my_y):
                 self.current_goal = Goal(escape_goal_cell, "escape_route", 999.0)
                 if not self.driver.path or (self.driver.path and self.driver.path[-1] != escape_goal_cell) or current_tick >= self.replan_tick:
-                    self.driver.path = self.planner.build_path(self.model.to_cell(my_x, my_y), escape_goal_cell, radius=14)
-                    self.replan_tick = current_tick + 10
+                    self.driver.path = self.planner.build_path(my_cell, escape_goal_cell, radius=26)
+                    self.replan_tick = current_tick + 8
                 while self.driver.path:
                     wx, wy = self.model.to_world_center(self.driver.path[0])
                     if euclidean_distance(my_x, my_y, wx, wy) < 2.5:
@@ -349,49 +552,103 @@ class SmartAgent:
             else:
                 turn, speed = self.driver.escape_drive(my_x, my_y, my_heading, top_speed)
                 mode = "emergency_escape"
+
+            if standing_on_danger and self.consecutive_danger_ticks >= 8:
+                safe_patch = self._closest_non_hazard_point(my_x, my_y, sensor)
+                if safe_patch is not None and safe_patch[2] <= 28.0:
+                    turn, speed = self.driver.drive_to_point(my_x, my_y, my_heading, safe_patch[0], safe_patch[1], top_speed)
+                    speed = max(speed, top_speed * 0.72)
+                    mode = "emergency_to_safe_patch"
+
+            if standing_on_danger and self.consecutive_danger_ticks >= 26:
+                push_cell = self.driver.best_immediate_safe_neighbor(my_cell, allow_risky=True)
+                if push_cell is not None and push_cell != my_cell:
+                    turn, speed = self.driver.drive_to_cell(my_x, my_y, my_heading, push_cell, top_speed)
+                    speed = max(speed, top_speed * 0.68)
+                    mode = "emergency_push_out"
         else:
+            important_event = self._important_sensor_event(
+                standing_on_danger=standing_on_danger,
+                enemies_visible=enemies_visible,
+                hp_lost=hp_lost,
+                stuck_triggered=stuck_triggered,
+                sensor=sensor,
+                my_x=my_x,
+                my_y=my_y,
+            )
+
             obstacle_avoid = self._reactive_obstacle_avoidance(my_x, my_y, my_heading, top_speed, sensor)
             if obstacle_avoid is not None:
                 turn, speed = obstacle_avoid
                 mode = "avoid_wall"
                 self.driver.path = []
                 self.current_goal = None
+                self._clear_route_commit()
             else:
                 near_powerup = self._closest_powerup_position(my_x, my_y, sensor)
-                if near_powerup is not None and near_powerup[2] <= 15.0 and not self._standing_on_danger(my_x, my_y, sensor):
+                if near_powerup is not None and near_powerup[2] <= 15.0 and not standing_on_danger:
                     turn, speed = self.driver.drive_to_point(my_x, my_y, my_heading, near_powerup[0], near_powerup[1], top_speed)
                     mode = "pickup_direct"
                     self.driver.path = []
                     self.current_goal = None
+                    self._clear_route_commit()
                 else:
-                    goal = self.goal_selector.choose_goal(
-                        my_x=my_x,
-                        my_y=my_y,
-                        hp_ratio=hp_ratio,
-                        sensor=sensor,
-                        standing_on_danger_fn=self._standing_on_danger,
-                        to_cell_fn=lambda mode, pos: self._xy(pos),
-                        powerup_type_fn=self._powerup_type_text,
+                    goal: Optional[Goal] = None
+                    has_route_commit = (
+                        current_tick < self.route_commit_until
+                        and self.current_goal is not None
+                        and len(self.driver.path) > 0
                     )
-                    if goal is not None:
-                        self._update_path(my_x, my_y, goal, current_tick)
-                        if goal.mode == "attack" and not self.driver.path:
-                            safe = self.goal_selector.nearest_safe_cell(self.model.to_cell(my_x, my_y), require_known=True)
-                            if safe is not None:
-                                safe_goal = Goal(safe, "reposition_safe", 650.0)
-                                self._update_path(my_x, my_y, safe_goal, current_tick)
-                                goal = safe_goal
-                        mode = goal.mode
+
+                    if has_route_commit and not important_event:
+                        goal = self.current_goal
+                        mode = f"route_commit_{self.route_commit_mode or goal.mode}"
+                    else:
+                        goal = self.goal_selector.choose_goal(
+                            my_x=my_x,
+                            my_y=my_y,
+                            hp_ratio=hp_ratio,
+                            sensor=sensor,
+                            standing_on_danger_fn=lambda _x, _y, _sensor: standing_on_danger,
+                            to_cell_fn=lambda mode, pos: self._xy(pos),
+                            powerup_type_fn=self._powerup_type_text,
+                        )
+                        if goal is not None:
+                            self._update_path(my_x, my_y, goal, current_tick)
+                            if goal.mode == "attack" and not self.driver.path:
+                                safe = self.goal_selector.nearest_safe_cell(self.model.to_cell(my_x, my_y), require_known=True)
+                                if safe is not None:
+                                    safe_goal = Goal(safe, "reposition_safe", 650.0)
+                                    self._update_path(my_x, my_y, safe_goal, current_tick)
+                                    goal = safe_goal
+
+                            if self.driver.path:
+                                self._begin_route_commit(current_tick, goal.mode)
+                            else:
+                                self._clear_route_commit()
+                            mode = goal.mode
+                        else:
+                            self._clear_route_commit()
+
+                    if (goal is None or not self.driver.path) and not standing_on_danger:
+                        probe_goal = self._local_probe_goal(my_cell)
+                        if probe_goal is not None:
+                            self._update_path(my_x, my_y, probe_goal, current_tick)
+                            if self.driver.path:
+                                goal = probe_goal
+                                mode = probe_goal.mode
+                                self._begin_route_commit(current_tick, probe_goal.mode)
 
                     turn, speed = self.driver.drive_path(my_x, my_y, my_heading, top_speed)
 
                     if goal is not None and not self.driver.path:
+                        self._clear_route_commit()
                         sidestep = self.driver.best_immediate_safe_neighbor(self.model.to_cell(my_x, my_y))
                         if sidestep is not None:
                             turn, speed = self.driver.drive_to_cell(my_x, my_y, my_heading, sidestep, top_speed)
                             mode = f"{mode}_sidestep"
                         else:
-                            turn, speed = self.driver.drive_to_cell(my_x, my_y, my_heading, goal.cell, top_speed * 0.55)
+                            turn, speed = self.driver.drive_to_cell(my_x, my_y, my_heading, goal.cell, top_speed * 0.9)
                             mode = f"{mode}_direct"
 
         barrel_rotation, should_fire = self.turret.update(
@@ -414,10 +671,25 @@ class SmartAgent:
             top_speed=top_speed,
         )
 
+        turn, speed = self._stabilize_direction_and_speed(
+            current_tick=current_tick,
+            mode=mode,
+            standing_on_danger=standing_on_danger,
+            enemies_visible=enemies_visible,
+            my_x=my_x,
+            my_y=my_y,
+            my_heading=my_heading,
+            sensor=sensor,
+            top_speed=top_speed,
+            turn=turn,
+            speed=speed,
+        )
+
         turn = self._clamp(turn, -max_heading, max_heading)
         speed = self._clamp(speed, -top_speed, top_speed)
         barrel_rotation = self._clamp(barrel_rotation, -max_barrel, max_barrel)
         self.driver.last_move_cmd = speed
+        self.last_cell = my_cell
 
         if current_tick % 60 == 0:
             goal_txt = self.current_goal.cell if self.current_goal else None

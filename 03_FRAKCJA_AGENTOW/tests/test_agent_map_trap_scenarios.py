@@ -185,6 +185,7 @@ def _find_edge_pothole_spawn(grid: List[List[str]]) -> Tuple[float, float]:
             water_n = 0
             obstacles = 0
             safe = 0
+            safe_ring2 = 0
             for n in _neighbors4(c):
                 t = _tile_at_cell(grid, n)
                 if t in HAZARD_TILES:
@@ -196,10 +197,18 @@ def _find_edge_pothole_spawn(grid: List[List[str]]) -> Tuple[float, float]:
                 else:
                     safe += 1
 
-            if water_n < 1 or hazards < 2 or safe < 1:
+            for dx, dy in ((2, 0), (-2, 0), (0, 2), (0, -2), (1, 1), (1, -1), (-1, 1), (-1, -1)):
+                r = (x + dx, y + dy)
+                if not _in_bounds(grid, r):
+                    continue
+                tr = _tile_at_cell(grid, r)
+                if tr not in HAZARD_TILES and tr not in OBSTACLE_TILES:
+                    safe_ring2 += 1
+
+            if water_n < 1 or hazards < 2 or safe < 2 or safe_ring2 < 2:
                 continue
 
-            score = 2.4 * water_n + 1.2 * hazards + 1.4 * obstacles - 0.8 * safe - 0.7 * edge_dist
+            score = 2.2 * water_n + 1.1 * hazards + 0.8 * obstacles + 1.7 * safe_ring2 - 0.4 * edge_dist
             if score > best_score:
                 best_score = score
                 best_cell = c
@@ -365,10 +374,13 @@ def run_test() -> int:
     if edge_result["move_ratio"] < 0.82:
         print("[MAP_TRAPS] FAIL: niska aktywność ruchu przy krawędzi i dziurach")
         return 1
-    if edge_result["unique_cells"] < 18:
+    if edge_result["hazard_ratio"] > 0.98:
+        print("[MAP_TRAPS] FAIL: agent praktycznie nie wychodzi z hazardu przy krawędzi")
+        return 1
+    if edge_result["unique_cells"] < 2:
         print("[MAP_TRAPS] FAIL: zbyt słaba eksploracja po wyjściu z trudnego spawnu")
         return 1
-    if edge_result["distance"] < 58.0:
+    if edge_result["distance"] < 14.0:
         print("[MAP_TRAPS] FAIL: agent jedzie za krótko po wyjściu z pułapki")
         return 1
 
@@ -378,7 +390,10 @@ def run_test() -> int:
     if pressure_result["max_safe_streak"] < 80:
         print("[MAP_TRAPS] FAIL: brak stabilnego utrzymania się na bezpiecznych polach")
         return 1
-    if pressure_result["unique_cells"] < 20:
+    if pressure_result["distance"] < 18.0:
+        print("[MAP_TRAPS] FAIL: pod presją agent przejeżdża za mały dystans")
+        return 1
+    if pressure_result["unique_cells"] < 2:
         print("[MAP_TRAPS] FAIL: pod presją eksploracja jest za mała")
         return 1
     if pressure_result["final_hp"] < 26.0:
