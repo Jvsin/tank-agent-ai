@@ -116,13 +116,39 @@ class FuzzyAgent:
         # ===================================================================
         # EKSTRAKCJA DANYCH O CZOŁGU
         # ===================================================================
+        # Pozycja
+        pos = my_tank_status.get('position', {})
+        if isinstance(pos, dict):
+            my_x = pos.get('x', 0.0)
+            my_y = pos.get('y', 0.0)
+        else:
+            my_x = getattr(pos, 'x', 0.0)
+            my_y = getattr(pos, 'y', 0.0)
+        
+        my_position = (my_x, my_y)
+        my_heading = my_tank_status.get('heading', 0.0)
+        my_hp = my_tank_status.get('hp', 100)
+        max_hp = my_tank_status.get('_max_hp', 100)
+        barrel_angle = my_tank_status.get('barrel_angle', 0.0)
+        max_heading = float(my_tank_status.get('_heading_spin_rate', 30.0) or 30.0)
+        max_barrel = float(my_tank_status.get('_barrel_spin_rate', 30.0) or 30.0)
+        top_speed = float(my_tank_status.get('_top_speed', 3.0) or 3.0)
+        
+        # ===================================================================
+        # HIERARCHIA DECYZJI (PRIORYTET OD NAJWYŻSZEGO)
+        # ===================================================================
+        
+        heading_rotation = 0.0
+        move_speed = 0.0
+        decision_source = "none"
+        
         try:
             # --- PRIORYTET 1: SZKODLIWY TEREN ---
             result = self.decision_maker.check_damaging_terrain(my_x, my_y, sensor_data)
             if result:
                 _, heading_rotation, move_speed = result
                 decision_source = "damaging_terrain"
-
+            
             # --- PRIORYTET 2: KOLIZJA Z PRZESZKODĄ ---
             if not result:
                 result = self.decision_maker.check_imminent_collision(
@@ -156,67 +182,6 @@ class FuzzyAgent:
             heading_rotation = 0.0
             move_speed = 0.0
             decision_source = "error"
-        
-        # Pozycja
-        pos = my_tank_status.get('position', {})
-        if isinstance(pos, dict):
-            my_x = pos.get('x', 0.0)
-            my_y = pos.get('y', 0.0)
-        else:
-            my_x = getattr(pos, 'x', 0.0)
-            my_y = getattr(pos, 'y', 0.0)
-        
-        my_position = (my_x, my_y)
-        my_heading = my_tank_status.get('heading', 0.0)
-        my_hp = my_tank_status.get('hp', 100)
-        max_hp = my_tank_status.get('_max_hp', 100)
-        barrel_angle = my_tank_status.get('barrel_angle', 0.0)
-        max_heading = float(my_tank_status.get('_heading_spin_rate', 30.0) or 30.0)
-        max_barrel = float(my_tank_status.get('_barrel_spin_rate', 30.0) or 30.0)
-        top_speed = float(my_tank_status.get('_top_speed', 3.0) or 3.0)
-        
-        # ===================================================================
-        # HIERARCHIA DECYZJI (PRIORYTET OD NAJWYŻSZEGO)
-        # ===================================================================
-        
-        heading_rotation = 0.0
-        move_speed = 0.0
-        decision_source = "none"
-        
-        # --- PRIORYTET 1: SZKODLIWY TEREN ---
-        result = self.decision_maker.check_damaging_terrain(my_x, my_y, sensor_data)
-        if result:
-            _, heading_rotation, move_speed = result
-            decision_source = "damaging_terrain"
-        
-        # --- PRIORYTET 2: KOLIZJA Z PRZESZKODĄ ---
-        if not result:
-            result = self.decision_maker.check_imminent_collision(
-                my_x, my_y, my_heading, sensor_data
-            )
-            if result:
-                _, heading_rotation, move_speed = result
-                decision_source = "collision_avoidance"
-        
-        # --- PRIORYTET 3: POWERUP W POBLIŻU ---
-        if not result:
-            result = self.decision_maker.check_nearby_powerup(
-                my_x, my_y, my_heading, sensor_data
-            )
-            if result:
-                _, heading_rotation, move_speed = result
-                decision_source = "powerup_collection"
-        
-        # --- PRIORYTET 4: FUZZY LOGIC (WALKA/EKSPLORACJA) ---
-        if not result:
-            heading_rotation, move_speed = self.motion_controller.compute_motion(
-                my_position=my_position,
-                my_heading=my_heading,
-                my_hp=my_hp,
-                max_hp=max_hp,
-                sensor_data=sensor_data
-            )
-            decision_source = "fuzzy_logic"
 
         heading_rotation = clamp(heading_rotation, -max_heading, max_heading)
         move_speed = clamp(move_speed, -top_speed, top_speed)
