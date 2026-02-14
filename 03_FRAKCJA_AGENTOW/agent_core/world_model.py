@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Tuple
+from typing import Dict, List, Tuple
 
 
 @dataclass
@@ -23,6 +23,11 @@ class WorldModel:
 
     def to_world_center(self, cell: Tuple[int, int]) -> Tuple[float, float]:
         return (cell[0] + 0.5) * self.grid_size, (cell[1] + 0.5) * self.grid_size
+
+    @staticmethod
+    def neighbors4(cell: Tuple[int, int]) -> List[Tuple[int, int]]:
+        x, y = cell
+        return [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)]
 
     def get_state(self, cell: Tuple[int, int]) -> CellState:
         if cell not in self.cell_states:
@@ -61,7 +66,26 @@ class WorldModel:
             return False
         return state.danger >= 1.0
 
+    def local_block_pressure(self, cell: Tuple[int, int]) -> float:
+        pressure = 0.0
+        for neighbor in self.neighbors4(cell):
+            if neighbor in self.dead_end_ttl:
+                pressure += 1.2
+                continue
+            state = self.cell_states.get(neighbor)
+            if state is None:
+                continue
+            pressure += 0.45 * state.blocked + 0.25 * state.danger
+        return pressure
+
     def movement_cost(self, cell: Tuple[int, int]) -> float:
         state = self.cell_states.get(cell, CellState())
         visits = float(self.visit_counts.get(cell, 0))
-        return 2.0 - 0.25 * min(state.safe, 3.0) + 5.0 * state.danger + 6.0 * state.blocked + 0.15 * min(visits, 12.0)
+        local_pressure = self.local_block_pressure(cell)
+        base = 1.9
+        base -= 0.35 * min(state.safe, 3.0)
+        base += 4.8 * state.danger
+        base += 7.2 * state.blocked
+        base += 0.8 * local_pressure
+        base += 0.12 * min(visits, 12.0)
+        return max(0.35, base)

@@ -17,6 +17,76 @@ class GoalSelector:
     def __init__(self, world_model: WorldModel):
         self.world_model = world_model
 
+    @staticmethod
+    def _manhattan(a: Tuple[int, int], b: Tuple[int, int]) -> int:
+        return abs(a[0] - b[0]) + abs(a[1] - b[1])
+
+    def _cell_safety_value(self, cell: Tuple[int, int]) -> float:
+        state = self.world_model.get_state(cell)
+        visits = self.world_model.visit_counts.get(cell, 0)
+        local_pressure = self.world_model.local_block_pressure(cell)
+        return (
+            2.8 * state.safe
+            - 6.5 * state.danger
+            - 4.2 * state.blocked
+            - 0.8 * local_pressure
+            - 0.18 * visits
+        )
+
+    def _unknown_neighbors(self, cell: Tuple[int, int]) -> int:
+        unknown = 0
+        for n in self.world_model.neighbors4(cell):
+            if n not in self.world_model.cell_states:
+                unknown += 1
+        return unknown
+
+    def _choose_attack_standoff(self, my_cell: Tuple[int, int], enemy_cell: Tuple[int, int]) -> Optional[Tuple[int, int]]:
+        best_cell: Optional[Tuple[int, int]] = None
+        best_score = -1e9
+
+        ex, ey = enemy_cell
+        for dx in range(-5, 6):
+            for dy in range(-5, 6):
+                cell = (ex + dx, ey + dy)
+                if self.world_model.is_blocked_for_pathing(cell):
+                    continue
+                dist_enemy = self._manhattan(cell, enemy_cell)
+                if dist_enemy < 2 or dist_enemy > 6:
+                    continue
+
+                dist_me = self._manhattan(cell, my_cell)
+                safety = self._cell_safety_value(cell)
+                score = 1.8 * safety - 0.35 * dist_me - 0.15 * abs(dist_enemy - 4)
+                if score > best_score:
+                    best_score = score
+                    best_cell = cell
+
+        return best_cell
+
+    def _choose_control_lane(self, my_cell: Tuple[int, int], radius: int = 12) -> Optional[Tuple[int, int]]:
+        best_cell: Optional[Tuple[int, int]] = None
+        best_score = -1e9
+
+        for dx in range(-radius, radius + 1):
+            for dy in range(-radius, radius + 1):
+                cell = (my_cell[0] + dx, my_cell[1] + dy)
+                if self.world_model.is_blocked_for_pathing(cell):
+                    continue
+
+                dist = abs(dx) + abs(dy)
+                if dist < 3 or dist > radius:
+                    continue
+
+                safety = self._cell_safety_value(cell)
+                frontier_bonus = 0.65 * self._unknown_neighbors(cell)
+                range_bonus = -0.12 * abs(dist - 7)
+                score = safety + frontier_bonus + range_bonus
+                if score > best_score:
+                    best_score = score
+                    best_cell = cell
+
+        return best_cell
+
     def enemy_cells(self, sensor: Dict[str, Any], to_cell_fn) -> List[Tuple[int, int]]:
         cells: List[Tuple[int, int]] = []
         for tank in sensor.get("seen_tanks", []):
@@ -47,7 +117,8 @@ class GoalSelector:
                 if state is None:
                     state = self.world_model.get_state(cell)
                 dist = abs(dx) + abs(dy)
-                score = 3.0 * state.safe - 6.0 * state.danger - 3.0 * state.blocked + 0.25 * dist
+                local_pressure = self.world_model.local_block_pressure(cell)
+                score = 3.0 * state.safe - 6.0 * state.danger - 3.5 * state.blocked - 0.8 * local_pressure + 0.22 * dist
                 if score > best_score:
                     best_score = score
                     best_cell = cell
@@ -87,8 +158,11 @@ class GoalSelector:
             if safe:
                 return Goal(safe, "low_hp_safe", 850.0)
 
-        if enemy_cells and hp_ratio >= 0.7:
+        if enemy_cells and hp_ratio >= 0.58:
             enemy_cells.sort(key=lambda cell: abs(cell[0] - my_cell[0]) + abs(cell[1] - my_cell[1]))
+            standoff = self._choose_attack_standoff(my_cell, enemy_cells[0])
+            if standoff is not None:
+                return Goal(standoff, "attack_standoff", 720.0)
             return Goal(enemy_cells[0], "attack", 700.0)
 
         if powerups:
@@ -101,6 +175,10 @@ class GoalSelector:
             powerups.sort(key=lambda item: abs(item[0][0] - my_cell[0]) + abs(item[0][1] - my_cell[1]))
             return Goal(powerups[0][0], "collect_powerup", 500.0)
 
+        control_cell = self._choose_control_lane(my_cell, radius=12)
+        if control_cell is not None:
+            return Goal(control_cell, "control_lane", 360.0)
+
         best_cell: Optional[Tuple[int, int]] = None
         best_value = 1e9
         for dx in range(-8, 9):
@@ -111,7 +189,8 @@ class GoalSelector:
                 visits = self.world_model.visit_counts.get(cell, 0)
                 state = self.world_model.get_state(cell)
                 dist_penalty = abs((abs(dx) + abs(dy)) - 5)
-                safety_penalty = 4.0 * state.danger + 3.0 * state.blocked - 0.6 * min(state.safe, 3.0)
+                local_pressure = self.world_model.local_block_pressure(cell)
+                safety_penalty = 4.5 * state.danger + 3.6 * state.blocked + 0.7 * local_pressure - 0.7 * min(state.safe, 3.0)
                 value = float(visits) + 0.1 * dist_penalty + safety_penalty
                 if value < best_value:
                     best_value = value

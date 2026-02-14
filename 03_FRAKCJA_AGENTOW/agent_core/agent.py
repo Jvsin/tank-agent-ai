@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel
@@ -168,6 +169,100 @@ class SmartAgent:
             else:
                 break
 
+    def _movement_risk_score(
+        self,
+        my_x: float,
+        my_y: float,
+        my_heading: float,
+        turn: float,
+        speed: float,
+        sensor: Dict[str, Any],
+    ) -> float:
+        predicted_heading = (my_heading + turn * 0.65) % 360.0
+        heading_rad = math.radians(predicted_heading)
+
+        look_steps = (2.2, 4.2, 6.8)
+        risk = 0.0
+
+        for dist_forward in look_steps:
+            px = my_x + math.cos(heading_rad) * dist_forward
+            py = my_y + math.sin(heading_rad) * dist_forward
+            cell = self.model.to_cell(px, py)
+            state = self.model.get_state(cell)
+            risk += 0.55 * state.danger + 0.65 * state.blocked
+            if self.model.is_blocked_for_pathing(cell):
+                risk += 3.5
+
+        cone_width = 58.0 if speed > 1.0 else 44.0
+        max_probe = 18.0 if speed > 0.5 else 12.0
+
+        for obstacle in sensor.get("seen_obstacles", []):
+            pos = obstacle.get("position", obstacle.get("_position", {})) if isinstance(obstacle, dict) else getattr(obstacle, "position", getattr(obstacle, "_position", None))
+            ox, oy = self._xy(pos)
+            dist = euclidean_distance(my_x, my_y, ox, oy)
+            if dist > max_probe:
+                continue
+            angle = heading_to_angle_deg(my_x, my_y, ox, oy)
+            rel = abs(normalize_angle_diff(angle, predicted_heading))
+            if rel > cone_width:
+                continue
+            risk += max(0.0, (max_probe - dist) * 0.33) + max(0.0, (cone_width - rel) * 0.03)
+
+        for terrain in sensor.get("seen_terrains", []):
+            damage = self._terrain_damage(terrain)
+            if damage <= 0:
+                continue
+            pos = terrain.get("position", terrain.get("_position", {})) if isinstance(terrain, dict) else getattr(terrain, "position", getattr(terrain, "_position", None))
+            tx, ty = self._xy(pos)
+            dist = euclidean_distance(my_x, my_y, tx, ty)
+            if dist > 16.0:
+                continue
+            angle = heading_to_angle_deg(my_x, my_y, tx, ty)
+            rel = abs(normalize_angle_diff(angle, predicted_heading))
+            if rel > 62.0:
+                continue
+            risk += max(0.0, (16.0 - dist) * 0.18) + max(0.0, (62.0 - rel) * 0.015)
+
+        if speed < 0.1:
+            risk += 0.35
+
+        return risk
+
+    def _self_preserving_command(
+        self,
+        my_x: float,
+        my_y: float,
+        my_heading: float,
+        turn: float,
+        speed: float,
+        sensor: Dict[str, Any],
+        max_heading: float,
+        top_speed: float,
+    ) -> Tuple[float, float]:
+        base_turn = self._clamp(turn, -max_heading, max_heading)
+        base_speed = self._clamp(speed, -top_speed, top_speed)
+        base_risk = self._movement_risk_score(my_x, my_y, my_heading, base_turn, base_speed, sensor)
+
+        turn_offsets = (0.0, 16.0, -16.0, 30.0, -30.0, 44.0, -44.0)
+        speed_scales = (1.0, 0.8, 0.6, 0.42)
+
+        best = (base_turn, base_speed)
+        best_score = base_risk
+
+        for t_off in turn_offsets:
+            candidate_turn = self._clamp(base_turn + t_off, -max_heading, max_heading)
+            for scale in speed_scales:
+                candidate_speed = self._clamp(base_speed * scale, -top_speed, top_speed)
+                risk = self._movement_risk_score(my_x, my_y, my_heading, candidate_turn, candidate_speed, sensor)
+                score = risk + 0.018 * abs(candidate_turn - base_turn) + 0.22 * abs(candidate_speed - base_speed) - 0.07 * max(0.0, candidate_speed)
+                if score < best_score:
+                    best_score = score
+                    best = (candidate_turn, candidate_speed)
+
+        if base_risk < 1.6:
+            return base_turn, base_speed
+        return best
+
     @staticmethod
     def _clamp(value: float, lo: float, hi: float) -> float:
         return max(lo, min(value, hi))
@@ -306,6 +401,17 @@ class SmartAgent:
             current_barrel_angle=barrel_angle,
             seen_tanks=sensor.get("seen_tanks", []),
             max_barrel_rotation=max_barrel,
+        )
+
+        turn, speed = self._self_preserving_command(
+            my_x=my_x,
+            my_y=my_y,
+            my_heading=my_heading,
+            turn=turn,
+            speed=speed,
+            sensor=sensor,
+            max_heading=max_heading,
+            top_speed=top_speed,
         )
 
         turn = self._clamp(turn, -max_heading, max_heading)
