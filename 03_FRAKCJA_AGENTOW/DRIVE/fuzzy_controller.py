@@ -229,8 +229,8 @@ class FuzzyMotionController:
                 if dist < min_dist:
                     min_dist = dist
                     closest_enemy = (tx, ty)
-                    # Oblicz kąt do wroga (w stopniach)
-                    enemy_angle = math.degrees(math.atan2(dy, dx))
+                    # Oblicz kąt do wroga (0=north, CW)
+                    enemy_angle = math.degrees(math.atan2(dx, dy)) % 360
             
             closest_enemy_dist = min_dist
         
@@ -240,7 +240,7 @@ class FuzzyMotionController:
         seen_obstacles = sensor_data.get('seen_obstacles', [])
         for obstacle in seen_obstacles:
             # Pozycja przeszkody
-            obs_pos = obstacle.get('_position', {})
+            obs_pos = obstacle.get('position', obstacle.get('_position', {}))
             if isinstance(obs_pos, dict):
                 ox, oy = obs_pos.get('x', 0), obs_pos.get('y', 0)
             else:
@@ -251,7 +251,7 @@ class FuzzyMotionController:
             dist = math.sqrt(dx*dx + dy*dy)
             
             # Sprawdź czy przeszkoda jest PRZED nami (w kierunku heading)
-            angle_to_obs = math.degrees(math.atan2(dy, dx))
+            angle_to_obs = math.degrees(math.atan2(dx, dy)) % 360
             angle_diff = self._normalize_angle_diff(angle_to_obs - my_heading)
             
             # Jeśli przeszkoda jest w przedziale ±60° przed nami
@@ -305,22 +305,37 @@ class FuzzyMotionController:
                 self.exploration_heading_offset = random.uniform(-20.0, 20.0)
                 self.exploration_timer = random.randint(30, 60)
             
-            # Jedź w losowym kierunku eksploracyjnym
-            heading_rotation = self.exploration_heading_offset
-            move_speed = 25.0  # Średnia prędkość eksploracji
+            # Jedź prosto, a skręcaj tylko gdy przeszkoda jest blisko
+            if obstacle_dist > 15.0:
+                heading_rotation = 0.0
+            else:
+                heading_rotation = max(-15.0, min(15.0, self.exploration_heading_offset))
+            move_speed = 30.0  # Stała prędkość eksploracji
             
         else:
             # NORMALNY TRYB - reaguj na wroga
             # Oblicz różnicę kąta między naszym heading a kierunkiem do wroga
             angle_diff = self._normalize_angle_diff(enemy_angle - my_heading)
+            abs_angle_diff = abs(angle_diff)
             
             # Skręt: turn_factor * angle_diff
             # Jeśli turn_factor = 1.0 → skręcamy maksymalnie w stronę wroga
             # Jeśli turn_factor = -1.0 → skręcamy maksymalnie od wroga
             # Jeśli turn_factor = 0.0 → nie skręcamy
             heading_rotation = turn_factor * min(45.0, max(-45.0, angle_diff))
+            # Deadzone przeciwko "kręceniu się" przy małym błędzie
+            if abs_angle_diff < 6.0:
+                heading_rotation = 0.0
             
             move_speed = speed_output
+            # Jeśli mamy wroga i stoimy w miejscu bez powodu, wymuś wolny ruch do przodu
+            if abs(move_speed) < 8.0 and hp_percent > 40.0 and closest_enemy_dist > 8.0:
+                move_speed = 12.0
+            # Ogranicz przypadkowe cofanie, gdy nie ma realnej potrzeby odwrotu
+            if move_speed < 0:
+                should_retreat = (closest_enemy_dist < 12.0 and hp_percent < 35.0)
+                if not should_retreat and obstacle_dist > 10.0:
+                    move_speed = 10.0
         
         return heading_rotation, move_speed
     

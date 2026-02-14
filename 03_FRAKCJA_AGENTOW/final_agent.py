@@ -127,6 +127,7 @@ class FuzzyAgent:
         
         my_position = (my_x, my_y)
         my_heading = my_tank_status.get('heading', 0.0)
+        my_team = my_tank_status.get('_team')
         my_hp = my_tank_status.get('hp', 100)
         max_hp = my_tank_status.get('_max_hp', 100)
         barrel_angle = my_tank_status.get('barrel_angle', 0.0)
@@ -134,6 +135,19 @@ class FuzzyAgent:
         max_barrel = float(my_tank_status.get('_barrel_spin_rate', 30.0) or 30.0)
         top_speed = float(my_tank_status.get('_top_speed', 3.0) or 3.0)
         
+        # ===================================================================
+        # FILTROWANIE SOJUSZNIKÓW Z DANYCH SENSORÓW
+        # ===================================================================
+        filtered_sensor_data = dict(sensor_data)
+        seen_tanks = sensor_data.get('seen_tanks', [])
+        if my_team is not None:
+            filtered_sensor_data['seen_tanks'] = [
+                tank for tank in seen_tanks
+                if tank.get('team') is None or tank.get('team') != my_team
+            ]
+        else:
+            filtered_sensor_data['seen_tanks'] = seen_tanks
+
         # ===================================================================
         # HIERARCHIA DECYZJI (PRIORYTET OD NAJWYŻSZEGO)
         # ===================================================================
@@ -144,7 +158,7 @@ class FuzzyAgent:
         
         try:
             # --- PRIORYTET 1: SZKODLIWY TEREN ---
-            result = self.decision_maker.check_damaging_terrain(my_x, my_y, sensor_data)
+            result = self.decision_maker.check_damaging_terrain(my_x, my_y, filtered_sensor_data)
             if result:
                 _, heading_rotation, move_speed = result
                 decision_source = "damaging_terrain"
@@ -152,7 +166,7 @@ class FuzzyAgent:
             # --- PRIORYTET 2: KOLIZJA Z PRZESZKODĄ ---
             if not result:
                 result = self.decision_maker.check_imminent_collision(
-                    my_x, my_y, my_heading, sensor_data
+                    my_x, my_y, my_heading, filtered_sensor_data
                 )
                 if result:
                     _, heading_rotation, move_speed = result
@@ -161,7 +175,7 @@ class FuzzyAgent:
             # --- PRIORYTET 3: POWERUP W POBLIŻU ---
             if not result:
                 result = self.decision_maker.check_nearby_powerup(
-                    my_x, my_y, my_heading, sensor_data
+                    my_x, my_y, my_heading, filtered_sensor_data
                 )
                 if result:
                     _, heading_rotation, move_speed = result
@@ -174,7 +188,7 @@ class FuzzyAgent:
                     my_heading=my_heading,
                     my_hp=my_hp,
                     max_hp=max_hp,
-                    sensor_data=sensor_data
+                    sensor_data=filtered_sensor_data
                 )
                 decision_source = "fuzzy_logic"
         except Exception as exc:
@@ -215,7 +229,7 @@ class FuzzyAgent:
             barrel_rotation = barrel_step * self.barrel_scan_direction
             
             # Jeśli widzimy wroga - zacznij celować
-            seen_tanks = sensor_data.get('seen_tanks', [])
+            seen_tanks = filtered_sensor_data.get('seen_tanks', [])
             if seen_tanks and len(seen_tanks) > 0:
                 # Wróg w zasięgu - przygotuj się do strzału
                 if random.random() < 0.2:  # 20% szansy

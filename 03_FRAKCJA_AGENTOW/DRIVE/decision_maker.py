@@ -28,10 +28,10 @@ def distance_2d(x1: float, y1: float, x2: float, y2: float) -> float:
 
 
 def angle_to_target(from_x: float, from_y: float, to_x: float, to_y: float) -> float:
-    """Oblicz kąt do celu (w stopniach)."""
+    """Oblicz kąt do celu (w stopniach) zgodny z silnikiem (0=north, CW)."""
     dx = to_x - from_x
     dy = to_y - from_y
-    return math.degrees(math.atan2(dy, dx))
+    return math.degrees(math.atan2(dx, dy)) % 360
 
 
 def normalize_angle_diff(angle: float) -> float:
@@ -83,7 +83,7 @@ class DecisionMaker:
         
         for terrain in seen_terrains:
             # Pozycja terenu
-            terrain_pos = terrain.get('_position', {})
+            terrain_pos = terrain.get('position', terrain.get('_position', {}))
             if isinstance(terrain_pos, dict):
                 tx, ty = terrain_pos.get('x', 0), terrain_pos.get('y', 0)
             else:
@@ -93,7 +93,7 @@ class DecisionMaker:
             dist = distance_2d(my_x, my_y, tx, ty)
             
             # Czy teren zadaje obrażenia?
-            deal_damage = terrain.get('_deal_damage', 0)
+            deal_damage = terrain.get('dmg', terrain.get('_deal_damage', 0))
             if isinstance(deal_damage, property):
                 deal_damage = terrain.get('deal_damage', 0)
             
@@ -130,7 +130,7 @@ class DecisionMaker:
         
         for obstacle in seen_obstacles:
             # Pozycja przeszkody
-            obs_pos = obstacle.get('_position', {})
+            obs_pos = obstacle.get('position', obstacle.get('_position', {}))
             if isinstance(obs_pos, dict):
                 ox, oy = obs_pos.get('x', 0), obs_pos.get('y', 0)
             else:
@@ -145,12 +145,12 @@ class DecisionMaker:
             
             # Jeśli przeszkoda BARDZO blisko (< 10m) i PRZED nami (±45°)
             if dist < 10.0 and abs(angle_diff) < 45:
-                # STOP! Skręć w stronę
+                # Cofnij się i skręć, żeby wyjść z kolizji
                 if angle_diff > 0:
                     turn = -30.0  # Skręć w lewo (od przeszkody)
                 else:
                     turn = 30.0   # Skręć w prawo (od przeszkody)
-                return (True, turn, 0.0)  # Zatrzymaj się
+                return (True, turn, -15.0)  # Cofnij się lekko
         
         return None
     
@@ -189,7 +189,7 @@ class DecisionMaker:
         
         for powerup in seen_powerups:
             # Pozycja powerupa
-            pu_pos = powerup.get('position', {})
+            pu_pos = powerup.get('position', powerup.get('_position', {}))
             if isinstance(pu_pos, dict):
                 px, py = pu_pos.get('x', 0), pu_pos.get('y', 0)
             else:
