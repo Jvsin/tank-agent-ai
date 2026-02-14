@@ -158,7 +158,7 @@ class FuzzyAgent:
         
         try:
             # --- PRIORYTET 1: SZKODLIWY TEREN ---
-            result = self.decision_maker.check_damaging_terrain(my_x, my_y, filtered_sensor_data)
+            result = self.decision_maker.check_damaging_terrain(my_x, my_y, filtered_sensor_data, my_heading)
             if result:
                 _, heading_rotation, move_speed = result
                 decision_source = "damaging_terrain"
