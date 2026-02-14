@@ -1,0 +1,129 @@
+from __future__ import annotations
+
+import math
+import random
+from typing import List, Optional, Tuple
+
+from .geometry import euclidean_distance, heading_to_angle_deg, normalize_angle_diff
+from .world_model import WorldModel
+
+
+class MotionDriver:
+    def __init__(self, world_model: WorldModel):
+        self.world_model = world_model
+        self.path: List[Tuple[int, int]] = []
+        self.last_position: Optional[Tuple[float, float]] = None
+        self.last_move_cmd: float = 0.0
+        self.stuck_ticks: int = 0
+        self.escape_ticks: int = 0
+        self.escape_heading: Optional[float] = None
+
+    @staticmethod
+    def neighbors4(cell: Tuple[int, int]) -> List[Tuple[int, int]]:
+        x, y = cell
+        return [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)]
+
+    def best_immediate_safe_neighbor(self, my_cell: Tuple[int, int]) -> Optional[Tuple[int, int]]:
+        best = None
+        best_score = -1e9
+        for cell in self.neighbors4(my_cell):
+            if self.world_model.is_blocked_for_pathing(cell):
+                continue
+            state = self.world_model.get_state(cell)
+            score = 4.0 * state.safe - 8.0 * state.danger - 4.0 * state.blocked - 0.2 * self.world_model.visit_counts.get(cell, 0)
+            if score > best_score:
+                best_score = score
+                best = cell
+        return best
+
+    def drive_to_cell(self, my_x: float, my_y: float, my_heading: float, target_cell: Tuple[int, int], top_speed: float) -> Tuple[float, float]:
+        tx, ty = self.world_model.to_world_center(target_cell)
+        return self.drive_to_point(my_x, my_y, my_heading, tx, ty, top_speed)
+
+    def drive_to_point(self, my_x: float, my_y: float, my_heading: float, tx: float, ty: float, top_speed: float) -> Tuple[float, float]:
+        target_angle = heading_to_angle_deg(my_x, my_y, tx, ty)
+        diff = normalize_angle_diff(target_angle, my_heading)
+        turn = max(-18.0, min(18.0, diff))
+
+        if abs(diff) > 45:
+            speed = top_speed * 0.25
+        elif abs(diff) > 20:
+            speed = top_speed * 0.55
+        else:
+            speed = top_speed
+        return turn, speed
+
+    def drive_path(self, my_x: float, my_y: float, my_heading: float, top_speed: float) -> Tuple[float, float]:
+        if not self.path:
+            return 0.0, max(0.4, top_speed * 0.35)
+
+        wx, wy = self.world_model.to_world_center(self.path[0])
+        target_angle = heading_to_angle_deg(my_x, my_y, wx, wy)
+        diff = normalize_angle_diff(target_angle, my_heading)
+
+        turn = max(-15.0, min(15.0, diff))
+
+        if abs(diff) > 45:
+            speed = top_speed * 0.2
+        elif abs(diff) > 20:
+            speed = top_speed * 0.45
+        else:
+            speed = top_speed * 0.9
+        return turn, speed
+
+    def update_stuck(self, my_x: float, my_y: float, enemies_visible: bool, heading: float) -> bool:
+        if self.last_position is None:
+            self.last_position = (my_x, my_y)
+            self.stuck_ticks = 0
+            return False
+
+        moved = euclidean_distance(my_x, my_y, self.last_position[0], self.last_position[1])
+        trying = self.last_move_cmd > 0.4
+
+        if trying and moved < 0.15 and not enemies_visible:
+            self.stuck_ticks += 1
+        else:
+            self.stuck_ticks = max(0, self.stuck_ticks - 1)
+
+        if self.stuck_ticks >= 10:
+            h = math.radians(heading)
+            px = my_x + math.cos(h) * 8.0
+            py = my_y + math.sin(h) * 8.0
+            blocked_cell = self.world_model.to_cell(px, py)
+            self.world_model.get_state(blocked_cell).blocked += 1.0
+            self.world_model.mark_dead_end(blocked_cell, ttl=520.0)
+            self.path = []
+            self.stuck_ticks = 0
+            self.last_position = (my_x, my_y)
+            return True
+
+        self.last_position = (my_x, my_y)
+        return False
+
+    def start_escape(self, my_heading: float) -> None:
+        if self.escape_heading is None:
+            turn = random.choice([120, 135, 150, 165, 180, -120, -135, -150, -165, -180])
+            self.escape_heading = (my_heading + turn) % 360
+        self.escape_ticks = max(self.escape_ticks, 45)
+
+    def escape_drive(self, my_x: float, my_y: float, my_heading: float, top_speed: float) -> Tuple[float, float]:
+        my_cell = self.world_model.to_cell(my_x, my_y)
+        safe_neighbor = self.best_immediate_safe_neighbor(my_cell)
+        if safe_neighbor is not None:
+            turn, speed = self.drive_to_cell(my_x, my_y, my_heading, safe_neighbor, top_speed)
+            self.escape_ticks = max(0, self.escape_ticks - 1)
+            if self.escape_ticks == 0:
+                self.escape_heading = None
+            return turn, speed
+
+        if self.escape_heading is None:
+            self.start_escape(my_heading)
+
+        assert self.escape_heading is not None
+        diff = normalize_angle_diff(self.escape_heading, my_heading)
+        turn = max(-18.0, min(18.0, diff))
+        speed = top_speed if abs(diff) < 30 else top_speed * 0.5
+        self.escape_ticks = max(0, self.escape_ticks - 1)
+        if self.escape_ticks == 0:
+            self.escape_heading = None
+        return turn, speed
