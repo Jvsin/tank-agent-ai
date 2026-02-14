@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from pydantic import BaseModel
 
 from .driver import MotionDriver
-from .geometry import euclidean_distance, to_xy
+from .geometry import euclidean_distance, heading_to_angle_deg, normalize_angle_diff, to_xy
 from .goal_selector import Goal, GoalSelector
 from .planner import AStarPlanner
 from .turret import SimpleTurretController
@@ -60,7 +60,15 @@ class SmartAgent:
         for obstacle in sensor.get("seen_obstacles", []):
             pos = obstacle.get("position", obstacle.get("_position", {})) if isinstance(obstacle, dict) else getattr(obstacle, "position", getattr(obstacle, "_position", None))
             ox, oy = self._xy(pos)
-            self.model.get_state(self.model.to_cell(ox, oy)).blocked += 1.0
+            obstacle_cell = self.model.to_cell(ox, oy)
+            self.model.get_state(obstacle_cell).blocked += 1.5
+            for nx, ny in (
+                (obstacle_cell[0] + 1, obstacle_cell[1]),
+                (obstacle_cell[0] - 1, obstacle_cell[1]),
+                (obstacle_cell[0], obstacle_cell[1] + 1),
+                (obstacle_cell[0], obstacle_cell[1] - 1),
+            ):
+                self.model.get_state((nx, ny)).blocked += 0.35
 
         for terrain in sensor.get("seen_terrains", []):
             pos = terrain.get("position", terrain.get("_position", {})) if isinstance(terrain, dict) else getattr(terrain, "position", getattr(terrain, "_position", None))
@@ -72,7 +80,7 @@ class SmartAgent:
             if damage > 0:
                 danger_boost = 2.5 if ("water" in terrain_type or "pothole" in terrain_type) else 1.3
                 state.danger += danger_boost
-                state.blocked += 0.8
+                state.blocked += 0.25
             else:
                 state.safe += 0.35
 
@@ -102,6 +110,41 @@ class SmartAgent:
                 best_distance = dist
                 best = (px, py, dist)
         return best
+
+    def _reactive_obstacle_avoidance(
+        self,
+        my_x: float,
+        my_y: float,
+        my_heading: float,
+        top_speed: float,
+        sensor: Dict[str, Any],
+    ) -> Optional[Tuple[float, float]]:
+        best_threat = 0.0
+        best_turn = 0.0
+
+        for obstacle in sensor.get("seen_obstacles", []):
+            pos = obstacle.get("position", obstacle.get("_position", {})) if isinstance(obstacle, dict) else getattr(obstacle, "position", getattr(obstacle, "_position", None))
+            ox, oy = self._xy(pos)
+            dist = euclidean_distance(my_x, my_y, ox, oy)
+            if dist > 22.0:
+                continue
+
+            obs_angle = heading_to_angle_deg(my_x, my_y, ox, oy)
+            rel = normalize_angle_diff(obs_angle, my_heading)
+            if abs(rel) > 42.0:
+                continue
+
+            threat = (22.0 - dist) + max(0.0, 42.0 - abs(rel)) * 0.08
+            if threat > best_threat:
+                best_threat = threat
+                best_turn = -26.0 if rel >= 0 else 26.0
+                blocked_cell = self.model.to_cell(ox, oy)
+                self.model.get_state(blocked_cell).blocked += 1.25
+                self.model.mark_dead_end(blocked_cell, ttl=540.0)
+
+        if best_threat > 0.0:
+            return best_turn, max(0.5, top_speed * 0.3)
+        return None
 
     def _update_path(self, my_x: float, my_y: float, goal: Goal, tick: int) -> None:
         start = self.model.to_cell(my_x, my_y)
@@ -164,11 +207,11 @@ class SmartAgent:
 
         if self.last_hp is not None:
             hp_lost = self.last_hp - hp
-            if 0.01 < hp_lost < 5.0 and not enemies_visible:
+            if 0.01 < hp_lost <= 12.0 and not enemies_visible:
                 cell = self.model.to_cell(my_x, my_y)
                 self.model.get_state(cell).danger += 3.0
                 self.model.mark_dead_end(cell, ttl=600.0)
-                self.driver.start_escape(my_heading)
+                self.driver.start_escape(my_heading, force_new=hp_lost >= 8.0)
         self.last_hp = hp
 
         mode = "idle"
@@ -179,42 +222,73 @@ class SmartAgent:
             self.driver.start_escape(my_heading)
 
         if self.driver.escape_ticks > 0:
-            self.driver.path = []
-            self.current_goal = None
-            turn, speed = self.driver.escape_drive(my_x, my_y, my_heading, top_speed)
-            mode = "emergency_escape"
+            escape_goal_cell = self.goal_selector.nearest_safe_cell(self.model.to_cell(my_x, my_y), radius=12, require_known=True)
+            if escape_goal_cell is not None and escape_goal_cell != self.model.to_cell(my_x, my_y):
+                self.current_goal = Goal(escape_goal_cell, "escape_route", 999.0)
+                if not self.driver.path or (self.driver.path and self.driver.path[-1] != escape_goal_cell) or current_tick >= self.replan_tick:
+                    self.driver.path = self.planner.build_path(self.model.to_cell(my_x, my_y), escape_goal_cell, radius=14)
+                    self.replan_tick = current_tick + 10
+                while self.driver.path:
+                    wx, wy = self.model.to_world_center(self.driver.path[0])
+                    if euclidean_distance(my_x, my_y, wx, wy) < 2.5:
+                        self.driver.path.pop(0)
+                    else:
+                        break
+
+            obstacle_avoid = self._reactive_obstacle_avoidance(my_x, my_y, my_heading, top_speed, sensor)
+            if obstacle_avoid is not None:
+                turn, speed = obstacle_avoid
+                mode = "emergency_escape_avoid"
+            elif self.driver.path:
+                turn, speed = self.driver.drive_path(my_x, my_y, my_heading, top_speed)
+                mode = "emergency_escape_route"
+            else:
+                turn, speed = self.driver.escape_drive(my_x, my_y, my_heading, top_speed)
+                mode = "emergency_escape"
         else:
-            near_powerup = self._closest_powerup_position(my_x, my_y, sensor)
-            if near_powerup is not None and near_powerup[2] <= 15.0 and not self._standing_on_danger(my_x, my_y, sensor):
-                turn, speed = self.driver.drive_to_point(my_x, my_y, my_heading, near_powerup[0], near_powerup[1], top_speed)
-                mode = "pickup_direct"
+            obstacle_avoid = self._reactive_obstacle_avoidance(my_x, my_y, my_heading, top_speed, sensor)
+            if obstacle_avoid is not None:
+                turn, speed = obstacle_avoid
+                mode = "avoid_wall"
                 self.driver.path = []
                 self.current_goal = None
             else:
-                goal = self.goal_selector.choose_goal(
-                    my_x=my_x,
-                    my_y=my_y,
-                    hp_ratio=hp_ratio,
-                    sensor=sensor,
-                    standing_on_danger_fn=self._standing_on_danger,
-                    to_cell_fn=lambda mode, pos: self._xy(pos),
-                    powerup_type_fn=self._powerup_type_text,
-                )
-                if goal is not None:
-                    self._update_path(my_x, my_y, goal, current_tick)
-                    if goal.mode == "attack" and not self.driver.path:
-                        safe = self.goal_selector.nearest_safe_cell(self.model.to_cell(my_x, my_y))
-                        if safe is not None:
-                            safe_goal = Goal(safe, "reposition_safe", 650.0)
-                            self._update_path(my_x, my_y, safe_goal, current_tick)
-                            goal = safe_goal
-                    mode = goal.mode
+                near_powerup = self._closest_powerup_position(my_x, my_y, sensor)
+                if near_powerup is not None and near_powerup[2] <= 15.0 and not self._standing_on_danger(my_x, my_y, sensor):
+                    turn, speed = self.driver.drive_to_point(my_x, my_y, my_heading, near_powerup[0], near_powerup[1], top_speed)
+                    mode = "pickup_direct"
+                    self.driver.path = []
+                    self.current_goal = None
+                else:
+                    goal = self.goal_selector.choose_goal(
+                        my_x=my_x,
+                        my_y=my_y,
+                        hp_ratio=hp_ratio,
+                        sensor=sensor,
+                        standing_on_danger_fn=self._standing_on_danger,
+                        to_cell_fn=lambda mode, pos: self._xy(pos),
+                        powerup_type_fn=self._powerup_type_text,
+                    )
+                    if goal is not None:
+                        self._update_path(my_x, my_y, goal, current_tick)
+                        if goal.mode == "attack" and not self.driver.path:
+                            safe = self.goal_selector.nearest_safe_cell(self.model.to_cell(my_x, my_y), require_known=True)
+                            if safe is not None:
+                                safe_goal = Goal(safe, "reposition_safe", 650.0)
+                                self._update_path(my_x, my_y, safe_goal, current_tick)
+                                goal = safe_goal
+                        mode = goal.mode
 
-                turn, speed = self.driver.drive_path(my_x, my_y, my_heading, top_speed)
+                    turn, speed = self.driver.drive_path(my_x, my_y, my_heading, top_speed)
 
-                if goal is not None and not self.driver.path:
-                    turn, speed = self.driver.drive_to_cell(my_x, my_y, my_heading, goal.cell, top_speed)
-                    mode = f"{mode}_direct"
+                    if goal is not None and not self.driver.path:
+                        sidestep = self.driver.best_immediate_safe_neighbor(self.model.to_cell(my_x, my_y))
+                        if sidestep is not None:
+                            turn, speed = self.driver.drive_to_cell(my_x, my_y, my_heading, sidestep, top_speed)
+                            mode = f"{mode}_sidestep"
+                        else:
+                            turn, speed = self.driver.drive_to_cell(my_x, my_y, my_heading, goal.cell, top_speed * 0.55)
+                            mode = f"{mode}_direct"
 
         barrel_rotation, should_fire = self.turret.update(
             my_x=my_x,

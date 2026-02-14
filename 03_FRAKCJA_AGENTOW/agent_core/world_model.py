@@ -51,7 +51,7 @@ class WorldModel:
             return False
         if state.blocked >= 1.0:
             return True
-        if state.danger > state.safe + 1.0:
+        if state.danger >= 4.0 and state.safe < 1.5:
             return True
         return False
 

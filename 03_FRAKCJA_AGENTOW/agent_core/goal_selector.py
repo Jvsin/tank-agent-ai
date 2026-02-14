@@ -33,7 +33,7 @@ class GoalSelector:
             out.append((self.world_model.to_cell(px, py), powerup_type_fn(powerup)))
         return out
 
-    def nearest_safe_cell(self, my_cell: Tuple[int, int], radius: int = 10) -> Optional[Tuple[int, int]]:
+    def nearest_safe_cell(self, my_cell: Tuple[int, int], radius: int = 10, require_known: bool = False) -> Optional[Tuple[int, int]]:
         best_cell: Optional[Tuple[int, int]] = None
         best_score = -1e9
         for dx in range(-radius, radius + 1):
@@ -41,7 +41,11 @@ class GoalSelector:
                 cell = (my_cell[0] + dx, my_cell[1] + dy)
                 if self.world_model.is_blocked_for_pathing(cell):
                     continue
-                state = self.world_model.get_state(cell)
+                state = self.world_model.cell_states.get(cell)
+                if require_known and state is None:
+                    continue
+                if state is None:
+                    state = self.world_model.get_state(cell)
                 dist = abs(dx) + abs(dy)
                 score = 3.0 * state.safe - 6.0 * state.danger - 3.0 * state.blocked + 0.25 * dist
                 if score > best_score:
@@ -70,7 +74,7 @@ class GoalSelector:
                 return Goal(closest[0], "pickup_now", 950.0)
 
         if standing_on_danger_fn(my_x, my_y, sensor):
-            safe = self.nearest_safe_cell(my_cell)
+            safe = self.nearest_safe_cell(my_cell, require_known=True)
             if safe:
                 return Goal(safe, "escape_danger", 999.0)
 
@@ -79,7 +83,7 @@ class GoalSelector:
             if medkits:
                 medkits.sort(key=lambda cell: abs(cell[0] - my_cell[0]) + abs(cell[1] - my_cell[1]))
                 return Goal(medkits[0], "low_hp_medkit", 900.0)
-            safe = self.nearest_safe_cell(my_cell)
+            safe = self.nearest_safe_cell(my_cell, require_known=True)
             if safe:
                 return Goal(safe, "low_hp_safe", 850.0)
 

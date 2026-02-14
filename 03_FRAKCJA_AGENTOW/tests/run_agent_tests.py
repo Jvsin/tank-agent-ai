@@ -12,6 +12,7 @@ THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 TEST_FILES = [
     "test_agent_no_idle.py",
     "test_agent_hazard_escape.py",
+    "test_agent_real_map_survival.py",
 ]
 
 
