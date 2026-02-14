@@ -5,10 +5,10 @@ from typing import Any, Dict, List, Optional, Tuple
 from pydantic import BaseModel
 
 from .driver import MotionDriver
+from .fuzzy_turret import FuzzyTurretController
 from .geometry import euclidean_distance, heading_to_angle_deg, normalize_angle_diff, to_xy
 from .goal_selector import Goal, GoalSelector
 from .planner import AStarPlanner
-from .turret import SimpleTurretController
 from .world_model import WorldModel
 
 
@@ -29,7 +29,7 @@ class SmartAgent:
         self.goal_selector = GoalSelector(self.model)
         self.planner = AStarPlanner(self.model)
         self.driver = MotionDriver(self.model)
-        self.turret = SimpleTurretController(scan_speed=22.0, track_speed=36.0, aim_threshold=3.0)
+        self.turret: Optional[FuzzyTurretController] = None  # Lazy init on first tick
 
         self.current_goal: Optional[Goal] = None
         self.replan_tick: int = 0
@@ -191,6 +191,15 @@ class SmartAgent:
         max_heading = float(my_tank_status.get("_heading_spin_rate", 30.0) or 30.0)
         max_barrel = float(my_tank_status.get("_barrel_spin_rate", 30.0) or 30.0)
         barrel_angle = float(my_tank_status.get("barrel_angle", 0.0) or 0.0)
+        vision_range = float(my_tank_status.get("_vision_range", 70.0) or 70.0)
+
+        # Lazy initialization of fuzzy turret controller with tank-specific capabilities
+        if self.turret is None:
+            self.turret = FuzzyTurretController(
+                max_barrel_spin_rate=max_barrel,
+                vision_range=vision_range,
+                aim_threshold=2.5,
+            )
 
         sensor = dict(sensor_data)
         seen_tanks = sensor_data.get("seen_tanks", [])
