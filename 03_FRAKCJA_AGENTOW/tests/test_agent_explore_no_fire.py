@@ -1,4 +1,4 @@
-"""Ensure agent does not fire while exploring (except for immediate self-defence)."""
+"""Ensure agent fires only when enemy is in firing range (ammo-dependent)."""
 import os
 import sys
 
@@ -11,40 +11,36 @@ from final_agent import SmartAgent
 from agent_core.goal_selector import Goal
 
 
-def test_agent_does_not_fire_while_exploring():
+def test_agent_does_not_fire_when_enemy_out_of_range():
+    """Agent strzela tylko gdy wróg jest w zasięgu załadowanej amunicji (LIGHT=50)."""
     agent = SmartAgent(name="ExploreNoFireTest")
 
-    # Force agent into explore route-commit state
-    agent.current_goal = Goal((5, 5), "explore", 300.0)
-    agent.route_commit_until = 999999
-    agent.route_commit_mode = "explore"
-    agent.driver.path = [(5, 5)]  # non-empty -> route_commit applies
-
-    # Simulate a visible enemy directly ahead (would normally be a firing candidate)
     my_status = {
         "position": {"x": 50.0, "y": 50.0},
         "heading": 0.0,
         "hp": 80.0,
         "_max_hp": 100.0,
         "_team": 1,
+        "_id": "tank_1",
         "_top_speed": 3.0,
         "_barrel_spin_rate": 90.0,
         "_heading_spin_rate": 70.0,
         "_vision_range": 100.0,
+        "ammo_loaded": "LIGHT",  # zasięg 50
     }
 
-    # Enemy is visible but relatively far (20 units)
+    # Wróg widoczny ale POZA zasięgiem LIGHT (50) - odległość ~60 jednostek
     sensor = {
         "seen_tanks": [
             {
                 "id": "enemy_1",
                 "team": 2,
                 "tank_type": "LIGHT",
-                "position": {"x": 60.0, "y": 50.0},
+                "position": {"x": 110.0, "y": 50.0},
                 "is_damaged": False,
                 "heading": 180.0,
                 "barrel_angle": 0.0,
-                "distance": 10.0,
+                "distance": 60.0,
             }
         ],
         "seen_obstacles": [],
@@ -54,7 +50,7 @@ def test_agent_does_not_fire_while_exploring():
 
     action = agent.get_action(current_tick=10, my_tank_status=my_status, sensor_data=sensor, enemies_remaining=1)
 
-    # Agent must NOT fire while exploring at this distance
+    # Agent NIE strzela gdy wróg poza zasięgiem amunicji
     assert hasattr(action, "should_fire")
     assert action.should_fire is False
 

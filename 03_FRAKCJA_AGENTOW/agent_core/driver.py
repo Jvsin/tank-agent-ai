@@ -17,6 +17,7 @@ class MotionDriver:
         self.stuck_ticks: int = 0
         self.escape_ticks: int = 0
         self.escape_heading: Optional[float] = None
+        self.unblock_ticks: int = 0
 
     @staticmethod
     def neighbors4(cell: Tuple[int, int]) -> List[Tuple[int, int]]:
@@ -96,14 +97,22 @@ class MotionDriver:
             speed = top_speed
         return turn, speed
 
-    def update_stuck(self, my_x: float, my_y: float, enemies_visible: bool, heading: float) -> bool:
+    def update_stuck(
+        self,
+        my_x: float,
+        my_y: float,
+        enemies_visible: bool,
+        heading: float,
+        blocking_tank_in_front: bool = False,
+    ) -> bool:
         if self.last_position is None:
             self.last_position = (my_x, my_y)
             self.stuck_ticks = 0
             return False
 
         moved = euclidean_distance(my_x, my_y, self.last_position[0], self.last_position[1])
-        trying = self.last_move_cmd > 0.4
+        # Gdy czołg blokuje przed nami, _self_preserving_command może obniżyć speed < 0.4
+        trying = self.last_move_cmd > (0.2 if blocking_tank_in_front else 0.4)
 
         if trying and moved < 0.15 and not enemies_visible:
             self.stuck_ticks += 1
@@ -131,6 +140,21 @@ class MotionDriver:
             turn = random.choice([120, 135, 150, 165, 180, -120, -135, -150, -165, -180])
             self.escape_heading = (my_heading + turn) % 360
         self.escape_ticks = max(self.escape_ticks, 45)
+
+    def start_unblock(self) -> None:
+        """Rozpoczyna tryb cofania przy deadlocku czołg-czołg."""
+        self.unblock_ticks = 12
+
+    def unblock_drive(self, top_speed: float, add_turn: bool = False) -> Tuple[float, float]:
+        """Cofanie się przy deadlocku. add_turn=True dla wroga: cofnij + lekki obrót."""
+        if self.unblock_ticks <= 0:
+            return 0.0, 0.0
+        self.unblock_ticks -= 1
+        speed = -top_speed * 0.6
+        turn = 0.0
+        if add_turn and self.unblock_ticks > 6:
+            turn = 22.0 if (self.unblock_ticks % 2 == 0) else -22.0
+        return turn, speed
 
     def escape_drive(self, my_x: float, my_y: float, my_heading: float, top_speed: float) -> Tuple[float, float]:
         my_cell = self.world_model.to_cell(my_x, my_y)

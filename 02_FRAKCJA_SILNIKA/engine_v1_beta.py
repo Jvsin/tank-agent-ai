@@ -622,7 +622,9 @@ def main():
         map_render_height = map_engine_height * SCALE
 
         # Ustaw okno na pełny ekran
-        screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+        # screen = pygame.display.set_mode((0, 0), pygame.RESIZABLE)
+        # Make screen 800x600
+        screen = pygame.display.set_mode((1920, 1080))
         window_width, window_height = screen.get_size()
         pygame.display.set_caption("Symulator Walk Czołgów")
         clock = pygame.time.Clock()

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, List, Set, Tuple
 
 
 @dataclass
@@ -17,6 +17,13 @@ class WorldModel:
         self.cell_states: Dict[Tuple[int, int], CellState] = {}
         self.visit_counts: Dict[Tuple[int, int], int] = {}
         self.dead_end_ttl: Dict[Tuple[int, int], float] = {}
+        self.ally_occupancy_ttl: Dict[Tuple[int, int], float] = {}
+        self.enemy_occupancy_ttl: Dict[Tuple[int, int], float] = {}
+        # Komórki z powerupami i checkpointami – A* preferuje je (niższy koszt)
+        self.powerup_cells: Set[Tuple[int, int]] = set()
+        self.preferred_powerup_cells: Set[Tuple[int, int]] = set()
+        self.checkpoint_cells: Set[Tuple[int, int]] = set()
+        self.pothole_cells: Set[Tuple[int, int]] = set()
 
     def to_cell(self, x: float, y: float) -> Tuple[int, int]:
         return int(x // self.grid_size), int(y // self.grid_size)
@@ -45,8 +52,34 @@ class WorldModel:
                 remaining[cell] = next_ttl
         self.dead_end_ttl = remaining
 
+        ally_remaining: Dict[Tuple[int, int], float] = {}
+        for cell, ttl in self.ally_occupancy_ttl.items():
+            next_ttl = ttl - 1.0
+            if next_ttl > 0:
+                ally_remaining[cell] = next_ttl
+        self.ally_occupancy_ttl = ally_remaining
+
+        enemy_remaining: Dict[Tuple[int, int], float] = {}
+        for cell, ttl in self.enemy_occupancy_ttl.items():
+            next_ttl = ttl - 1.0
+            if next_ttl > 0:
+                enemy_remaining[cell] = next_ttl
+        self.enemy_occupancy_ttl = enemy_remaining
+
     def mark_dead_end(self, cell: Tuple[int, int], ttl: float = 520.0) -> None:
         self.dead_end_ttl[cell] = max(self.dead_end_ttl.get(cell, 0.0), ttl)
+
+    def mark_ally_occupancy(self, cell: Tuple[int, int], ttl: float = 4.0) -> None:
+        self.ally_occupancy_ttl[cell] = max(self.ally_occupancy_ttl.get(cell, 0.0), ttl)
+
+    def ally_occupancy_score(self, cell: Tuple[int, int]) -> float:
+        return self.ally_occupancy_ttl.get(cell, 0.0)
+
+    def mark_enemy_occupancy(self, cell: Tuple[int, int], ttl: float = 4.0) -> None:
+        self.enemy_occupancy_ttl[cell] = max(self.enemy_occupancy_ttl.get(cell, 0.0), ttl)
+
+    def enemy_occupancy_score(self, cell: Tuple[int, int]) -> float:
+        return self.enemy_occupancy_ttl.get(cell, 0.0)
 
     def is_blocked_for_pathing(self, cell: Tuple[int, int]) -> bool:
         if cell in self.dead_end_ttl:
@@ -54,6 +87,9 @@ class WorldModel:
         state = self.cell_states.get(cell)
         if state is None:
             return False
+        if cell in self.pothole_cells:
+            # PotholeRoad is risky and slow, but should stay traversable when needed.
+            return state.blocked >= 2.5 or (state.danger >= 9.0 and state.safe < 0.6)
         if state.blocked >= 1.0:
             return True
         if state.danger >= 4.0 and state.safe < 1.5:
@@ -82,7 +118,21 @@ class WorldModel:
         state = self.cell_states.get(cell, CellState())
         visits = float(self.visit_counts.get(cell, 0))
         local_pressure = self.local_block_pressure(cell)
+        ally_occupancy = self.ally_occupancy_score(cell)
+        enemy_occupancy = self.enemy_occupancy_score(cell)
         base = 1.9
+
+        # Checkpoint na drodze – delikatna preferencja (ścieżka przez korytarz)
+        if cell in self.checkpoint_cells:
+            base *= 0.75
+
+        # Powerupy: preferowane tylko gdy warto (np. medkit przy niskim HP, ammo dla wybranego typu)
+        if cell in self.powerup_cells:
+            base *= 0.92
+        if cell in self.preferred_powerup_cells:
+            base *= 0.5
+        if cell in self.pothole_cells:
+            base += 1.2
 
         # Unknown-cell penalty: prefer known safe ground over unexplored tiles.
         if cell not in self.cell_states:
@@ -93,4 +143,8 @@ class WorldModel:
         base += 7.2 * state.blocked
         base += 0.8 * local_pressure
         base += 0.12 * min(visits, 12.0)
+        # High but finite penalty: avoid friendly collisions without hard deadlocks.
+        base += 6.5 * ally_occupancy
+        # Wyższy koszt dla wrogów – omijaj ich przy planowaniu.
+        base += 8.0 * enemy_occupancy
         return max(0.35, base)

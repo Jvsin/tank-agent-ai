@@ -633,10 +633,13 @@ def process_physics_tick(
             continue
 
         # Tank-tank collision -> rollback (simple resolution)
+        # Sojusznicy (ten sam zespół) nie kolidują – pozwalamy na przejście (unika deadlocku ally-ally)
         collided_with: Optional[str] = None
         for other in all_tanks:
             if other._id == tank._id or other.hp <= 0:
                 continue
+            if getattr(tank, "_team", None) == getattr(other, "_team", None) and tank._team is not None:
+                continue  # same team – skip collision
             if check_tank_tank_collision(tank, other):
                 collided_with = other._id
                 break

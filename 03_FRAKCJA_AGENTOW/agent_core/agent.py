@@ -5,12 +5,17 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel
 
+from .checkpoints import build_checkpoints_to_enemy, get_firing_range, lane_offset_checkpoint
 from .driver import MotionDriver
 from .fuzzy_turret import FuzzyTurretController
 from .geometry import euclidean_distance, heading_to_angle_deg, normalize_angle_diff, to_xy
 from .goal_selector import Goal, GoalSelector
 from .planner import AStarPlanner
 from .world_model import WorldModel
+
+# Tymczasowe flagi do testów
+DISABLE_ESCAPE_MODE = False  # Wyłącz tryb ucieczki, testuj samo chodzenie
+PRIMARY_AMMO = "LONG_DISTANCE"
 
 
 class ActionCommand(BaseModel):
@@ -43,6 +48,13 @@ class SmartAgent:
         self.last_turn_cmd: float = 0.0
         self.last_turn_flip_tick: int = -9999
         self.last_mode: str = "idle"
+        self.my_tank_id: str = "default"
+        self.preferred_ammo: str = PRIMARY_AMMO
+
+        # Checkpoint-based movement: lista per zespół (ustalana na start), indeks per czołg
+        self.checkpoints_by_team: Dict[int, List[Tuple[float, float]]] = {}
+        self.checkpoint_index_by_tank: Dict[str, int] = {}
+        self.checkpoint_arrival_radius: float = 15.0
 
         print(f"[{self.name}] online")
 
@@ -62,7 +74,49 @@ class SmartAgent:
             return str(powerup.get("powerup_type", powerup.get("_powerup_type", ""))).lower()
         return str(getattr(powerup, "powerup_type", getattr(powerup, "_powerup_type", ""))).lower()
 
-    def _update_world(self, my_x: float, my_y: float, sensor: Dict[str, Any]) -> None:
+    def _mark_allies_occupancy(self, my_x: float, my_y: float, seen_allies: List[Any]) -> None:
+        my_cell = self.model.to_cell(my_x, my_y)
+        for ally in seen_allies:
+            pos = ally.get("position", ally.get("_position", {})) if isinstance(ally, dict) else getattr(ally, "position", getattr(ally, "_position", None))
+            ax, ay = self._xy(pos)
+            ally_cell = self.model.to_cell(ax, ay)
+            if ally_cell == my_cell:
+                continue
+
+            self.model.mark_ally_occupancy(ally_cell, ttl=5.0)
+            heading = float(ally.get("heading", ally.get("_heading", 0.0)) if isinstance(ally, dict) else getattr(ally, "heading", getattr(ally, "_heading", 0.0)) or 0.0)
+            heading_rad = math.radians(heading)
+            for step, ttl in ((1, 4.0), (2, 2.5)):
+                px = ax + math.cos(heading_rad) * self.model.grid_size * step
+                py = ay + math.sin(heading_rad) * self.model.grid_size * step
+                self.model.mark_ally_occupancy(self.model.to_cell(px, py), ttl=ttl)
+
+    def _mark_enemy_occupancy(self, my_x: float, my_y: float, seen_enemies: List[Any]) -> None:
+        """Oznacza komórki wrogów w WorldModel, aby A* omijał je przy planowaniu."""
+        my_cell = self.model.to_cell(my_x, my_y)
+        for enemy in seen_enemies:
+            pos = enemy.get("position", enemy.get("_position", {})) if isinstance(enemy, dict) else getattr(enemy, "position", getattr(enemy, "_position", None))
+            ex, ey = self._xy(pos)
+            enemy_cell = self.model.to_cell(ex, ey)
+            if enemy_cell == my_cell:
+                continue
+
+            self.model.mark_enemy_occupancy(enemy_cell, ttl=5.0)
+            heading = float(enemy.get("heading", enemy.get("_heading", 0.0)) if isinstance(enemy, dict) else getattr(enemy, "heading", getattr(enemy, "_heading", 0.0)) or 0.0)
+            heading_rad = math.radians(heading)
+            for step, ttl in ((1, 4.0), (2, 2.5)):
+                px = ex + math.cos(heading_rad) * self.model.grid_size * step
+                py = ey + math.sin(heading_rad) * self.model.grid_size * step
+                self.model.mark_enemy_occupancy(self.model.to_cell(px, py), ttl=ttl)
+
+    def _update_world(
+        self,
+        my_x: float,
+        my_y: float,
+        sensor: Dict[str, Any],
+        hp_ratio: float,
+        ammo_stocks: Dict[str, int],
+    ) -> None:
         me = self.model.to_cell(my_x, my_y)
         self.model.increment_visit(me)
 
@@ -79,6 +133,7 @@ class SmartAgent:
             ):
                 self.model.get_state((nx, ny)).blocked += 0.35
 
+        self.model.pothole_cells = set()
         for terrain in sensor.get("seen_terrains", []):
             pos = terrain.get("position", terrain.get("_position", {})) if isinstance(terrain, dict) else getattr(terrain, "position", getattr(terrain, "_position", None))
             tx, ty = self._xy(pos)
@@ -87,16 +142,59 @@ class SmartAgent:
             terrain_type = str(terrain.get("type", "")).lower() if isinstance(terrain, dict) else str(getattr(terrain, "terrain_type", getattr(terrain, "_terrain_type", ""))).lower()
             state = self.model.get_state(cell)
             if damage > 0:
-                danger_boost = 2.5 if ("water" in terrain_type or "pothole" in terrain_type) else 1.3
-                state.danger += danger_boost
-                state.blocked += 0.25
-                # Mark neighbouring cells as slightly more dangerous so planner avoids
-                for nx, ny in ((cell[0]+1, cell[1]), (cell[0]-1, cell[1]), (cell[0], cell[1]+1), (cell[0], cell[1]-1)):
-                    nstate = self.model.get_state((nx, ny))
-                    nstate.danger += 0.6
-                    nstate.blocked += 0.12
+                if "water" in terrain_type:
+                    danger_boost = 3.4
+                    state.danger += danger_boost
+                    state.blocked += 0.25
+                    # Water remains strongly repulsive.
+                    for nx, ny in ((cell[0]+1, cell[1]), (cell[0]-1, cell[1]), (cell[0], cell[1]+1), (cell[0], cell[1]-1)):
+                        nstate = self.model.get_state((nx, ny))
+                        nstate.danger += 0.9
+                        nstate.blocked += 0.18
+                elif "pothole" in terrain_type:
+                    self.model.pothole_cells.add(cell)
+                    # PotholeRoad hurts, but should stay passable if it's the only lane.
+                    state.danger = min(3.2, state.danger + 0.55)
+                    for nx, ny in ((cell[0]+1, cell[1]), (cell[0]-1, cell[1]), (cell[0], cell[1]+1), (cell[0], cell[1]-1)):
+                        nstate = self.model.get_state((nx, ny))
+                        nstate.danger += 0.14
+                else:
+                    danger_boost = 1.3
+                    state.danger += danger_boost
+                    state.blocked += 0.22
+                    for nx, ny in ((cell[0]+1, cell[1]), (cell[0]-1, cell[1]), (cell[0], cell[1]+1), (cell[0], cell[1]-1)):
+                        nstate = self.model.get_state((nx, ny))
+                        nstate.danger += 0.45
+                        nstate.blocked += 0.08
             else:
                 state.safe += 0.35
+
+        # Powerupy – preferencja zależna od kontekstu (HP, ammo policy).
+        self.model.powerup_cells = set()
+        self.model.preferred_powerup_cells = set()
+        for powerup in sensor.get("seen_powerups", []):
+            pos = powerup.get("position", powerup.get("_position", {})) if isinstance(powerup, dict) else getattr(powerup, "position", getattr(powerup, "_position", None))
+            px, py = self._xy(pos)
+            powerup_cell = self.model.to_cell(px, py)
+            self.model.powerup_cells.add(powerup_cell)
+            ptxt = self._powerup_type_text(powerup)
+            is_preferred = False
+            if "medkit" in ptxt and hp_ratio <= 0.75:
+                is_preferred = True
+            elif "shield" in ptxt and hp_ratio <= 0.9:
+                is_preferred = True
+            elif "overcharge" in ptxt:
+                is_preferred = True
+            elif "ammo" in ptxt:
+                wants_primary = (
+                    ("long" in ptxt and self.preferred_ammo == "LONG_DISTANCE")
+                    or ("light" in ptxt and self.preferred_ammo == "LIGHT")
+                    or ("heavy" in ptxt and self.preferred_ammo == "HEAVY")
+                )
+                is_preferred = wants_primary or ammo_stocks.get(self.preferred_ammo, 0) <= 0
+
+            if is_preferred:
+                self.model.preferred_powerup_cells.add(powerup_cell)
 
     def _standing_on_danger(self, my_x: float, my_y: float, sensor: Dict[str, Any]) -> bool:
         if self._standing_on_live_hazard(my_x, my_y, sensor):
@@ -118,6 +216,157 @@ class SmartAgent:
             if euclidean_distance(my_x, my_y, tx, ty) <= self.model.grid_size * 0.8:
                 return True
         return False
+
+    def _enemy_in_firing_range(
+        self,
+        my_x: float,
+        my_y: float,
+        sensor: Dict[str, Any],
+        firing_range: float,
+    ) -> Optional[Tuple[float, float, float]]:
+        """Zwraca najbliższego wroga w zasięgu strzału: (x, y, distance) lub None."""
+        best: Optional[Tuple[float, float, float]] = None
+        best_dist = firing_range + 1.0
+        for tank in sensor.get("seen_tanks", []):
+            pos = tank.get("position", tank.get("_position", {})) if isinstance(tank, dict) else getattr(tank, "position", getattr(tank, "_position", None))
+            tx, ty = self._xy(pos)
+            dist = euclidean_distance(my_x, my_y, tx, ty)
+            if dist <= firing_range and dist < best_dist:
+                best_dist = dist
+                best = (tx, ty, dist)
+        return best
+
+    def _closest_enemy(self, my_x: float, my_y: float, sensor: Dict[str, Any]) -> Optional[Tuple[float, float, float]]:
+        best: Optional[Tuple[float, float, float]] = None
+        best_dist = float("inf")
+        for tank in sensor.get("seen_tanks", []):
+            pos = tank.get("position", tank.get("_position", {})) if isinstance(tank, dict) else getattr(tank, "position", getattr(tank, "_position", None))
+            tx, ty = self._xy(pos)
+            dist = euclidean_distance(my_x, my_y, tx, ty)
+            if dist < best_dist:
+                best_dist = dist
+                best = (tx, ty, dist)
+        return best
+
+    def _ally_blocking_front(self, my_x: float, my_y: float, my_heading: float, allies: List[Any]) -> bool:
+        return self._blocking_ally_id(my_x, my_y, my_heading, allies) is not None
+
+    def _blocking_ally_id(self, my_x: float, my_y: float, my_heading: float, allies: List[Any]) -> Optional[str]:
+        """Zwraca ID sojusznika blokującego przed nami, lub None."""
+        for ally in allies:
+            pos = ally.get("position", ally.get("_position", {})) if isinstance(ally, dict) else getattr(ally, "position", getattr(ally, "_position", None))
+            ax, ay = self._xy(pos)
+            dist = euclidean_distance(my_x, my_y, ax, ay)
+            if dist > 14.0:
+                continue
+            angle = heading_to_angle_deg(my_x, my_y, ax, ay)
+            rel = abs(normalize_angle_diff(angle, my_heading))
+            if rel <= 24.0:
+                return str(ally.get("id", ally.get("_id", "")))
+        return None
+
+    def _enemy_blocking_front(self, my_x: float, my_y: float, my_heading: float, enemies: List[Any]) -> bool:
+        """Sprawdza, czy wróg blokuje drogę przed nami."""
+        for enemy in enemies:
+            pos = enemy.get("position", enemy.get("_position", {})) if isinstance(enemy, dict) else getattr(enemy, "position", getattr(enemy, "_position", None))
+            ex, ey = self._xy(pos)
+            dist = euclidean_distance(my_x, my_y, ex, ey)
+            if dist > 14.0:
+                continue
+            angle = heading_to_angle_deg(my_x, my_y, ex, ey)
+            rel = abs(normalize_angle_diff(angle, my_heading))
+            if rel <= 24.0:
+                return True
+        return False
+
+    def _get_checkpoints(self, team: int) -> List[Tuple[float, float]]:
+        """Pobiera listę checkpointów dla zespołu (tworzy przy pierwszym wywołaniu)."""
+        if team not in self.checkpoints_by_team:
+            start_x = 41.0 if team == 1 else 181.0
+            start_y = 41.0
+            self.checkpoints_by_team[team] = build_checkpoints_to_enemy(
+                team=team,
+                start_x=start_x,
+                start_y=start_y,
+                map_width=200.0,
+                map_height=200.0,
+                map_filename="advanced_road_trees.csv",
+            )
+        return self.checkpoints_by_team[team]
+
+    def _lane_adjusted_checkpoint(self, tank_id: str, checkpoint: Tuple[float, float]) -> Tuple[float, float]:
+        return lane_offset_checkpoint(tank_id, checkpoint)
+
+    @staticmethod
+    def _ammo_stocks(my_tank_status: Dict[str, Any]) -> Dict[str, int]:
+        stocks = {
+            "LIGHT": 0,
+            "HEAVY": 0,
+            "LONG_DISTANCE": 0,
+        }
+        raw = my_tank_status.get("ammo_inventory")
+        if isinstance(raw, dict):
+            for key in stocks:
+                stocks[key] = int(raw.get(key, 0) or 0)
+            return stocks
+
+        aliases = {
+            "LIGHT": ("light_ammo", "_light_ammo", "ammo_light"),
+            "HEAVY": ("heavy_ammo", "_heavy_ammo", "ammo_heavy"),
+            "LONG_DISTANCE": ("long_distance_ammo", "_long_distance_ammo", "sniper_ammo", "_sniper_ammo", "ammo_long_distance"),
+        }
+        for key, names in aliases.items():
+            for name in names:
+                if name in my_tank_status:
+                    stocks[key] = int(my_tank_status.get(name, 0) or 0)
+                    break
+        return stocks
+
+    def _choose_ammo_to_load(self, my_tank_status: Dict[str, Any], enemy_close: bool) -> Optional[str]:
+        ammo_loaded = str(my_tank_status.get("ammo_loaded", "") or "").upper()
+        stocks = self._ammo_stocks(my_tank_status)
+        preferred = self.preferred_ammo
+
+        if ammo_loaded == preferred:
+            return None
+        if stocks.get(preferred, 0) > 0:
+            return preferred
+
+        if enemy_close:
+            if stocks.get("LIGHT", 0) > 0 and ammo_loaded != "LIGHT":
+                return "LIGHT"
+            if stocks.get("HEAVY", 0) > 0 and ammo_loaded != "HEAVY":
+                return "HEAVY"
+
+        return None
+
+    def _closest_destructible_obstacle(
+        self,
+        my_x: float,
+        my_y: float,
+        sensor: Dict[str, Any],
+        max_dist: float = 45.0,
+    ) -> Optional[Tuple[float, float, float]]:
+        """Zwraca najbliższą zniszczalną przeszkodę (Tree itp.): (x, y, distance) lub None."""
+        best: Optional[Tuple[float, float, float]] = None
+        best_dist = max_dist + 1.0
+        for obs in sensor.get("seen_obstacles", []):
+            if not (obs.get("is_destructible", False) if isinstance(obs, dict) else getattr(obs, "is_destructible", False)):
+                continue
+            pos = obs.get("position", obs.get("_position", {})) if isinstance(obs, dict) else getattr(obs, "position", getattr(obs, "_position", None))
+            ox, oy = self._xy(pos)
+            dist = euclidean_distance(my_x, my_y, ox, oy)
+            if dist <= max_dist and dist < best_dist:
+                best_dist = dist
+                best = (ox, oy, dist)
+        return best
+
+    def _obstacle_blocks_route(self, ox: float, oy: float) -> bool:
+        obstacle_cell = self.model.to_cell(ox, oy)
+        if not self.driver.path:
+            return False
+        route_head = self.driver.path[:4]
+        return obstacle_cell in route_head
 
     def _closest_powerup_position(self, my_x: float, my_y: float, sensor: Dict[str, Any]) -> Optional[Tuple[float, float, float]]:
         best: Optional[Tuple[float, float, float]] = None
@@ -152,6 +401,7 @@ class SmartAgent:
         my_heading: float,
         top_speed: float,
         sensor: Dict[str, Any],
+        seen_allies: Optional[List[Any]] = None,
     ) -> Optional[Tuple[float, float]]:
         best_threat = 0.0
         best_turn = 0.0
@@ -175,6 +425,28 @@ class SmartAgent:
                 blocked_cell = self.model.to_cell(ox, oy)
                 self.model.get_state(blocked_cell).blocked += 1.25
                 self.model.mark_dead_end(blocked_cell, ttl=540.0)
+
+        # Treat visible tanks (allies + enemies) as obstacles to avoid collision deadlock
+        all_tanks: List[Any] = list(seen_allies or [])
+        all_tanks.extend(sensor.get("seen_tanks", []))
+        for tank in all_tanks:
+            pos = tank.get("position", tank.get("_position", {})) if isinstance(tank, dict) else getattr(tank, "position", getattr(tank, "_position", None))
+            tx, ty = self._xy(pos)
+            dist = euclidean_distance(my_x, my_y, tx, ty)
+            if dist > 18.0:
+                continue
+
+            tank_angle = heading_to_angle_deg(my_x, my_y, tx, ty)
+            rel = normalize_angle_diff(tank_angle, my_heading)
+            if abs(rel) > 45.0:
+                continue
+
+            threat = (18.0 - dist) + max(0.0, 45.0 - abs(rel)) * 0.06
+            if threat > best_threat:
+                best_threat = threat
+                best_turn = -26.0 if rel >= 0 else 26.0
+                blocked_cell = self.model.to_cell(tx, ty)
+                self.model.get_state(blocked_cell).blocked += 0.9
 
         if best_threat > 0.0:
             return best_turn, max(0.5, top_speed * 0.3)
@@ -341,6 +613,7 @@ class SmartAgent:
             cell = self.model.to_cell(px, py)
             state = self.model.get_state(cell)
             risk += 0.55 * state.danger + 0.65 * state.blocked
+            risk += 1.1 * self.model.ally_occupancy_score(cell)
             if self.model.is_blocked_for_pathing(cell):
                 risk += 3.5
 
@@ -443,6 +716,7 @@ class SmartAgent:
             and not mode.startswith("emergency")
             and not mode.startswith("avoid")
             and not mode.startswith("attack")
+            and not mode.startswith("unblock")
         )
 
         if not stable_mode:
@@ -465,12 +739,15 @@ class SmartAgent:
                 self.last_turn_flip_tick = current_tick
 
         risk = self._movement_risk_score(my_x, my_y, my_heading, turn, speed, sensor)
-        cruise_mode = mode.startswith("route_commit") or mode in ("control_lane", "explore", "local_probe")
-        if cruise_mode and risk < 1.35:
+        ally_pressure = self.model.ally_occupancy_score(self.model.to_cell(my_x, my_y))
+        cruise_mode = mode.startswith("route_commit") or mode.startswith("checkpoint") or mode in ("control_lane", "explore", "local_probe", "patrol")
+        if cruise_mode and risk < 1.35 and ally_pressure < 0.2:
             if abs(turn) <= 8.0:
                 speed = max(speed, top_speed * 0.86)
             else:
                 speed = max(speed, top_speed * 0.72)
+        elif ally_pressure >= 0.2:
+            speed = min(speed, top_speed * 0.62)
 
         self.last_turn_cmd = turn
         self.last_mode = mode
@@ -490,10 +767,12 @@ class SmartAgent:
         my_x, my_y = self._xy(my_tank_status.get("position", {}))
         my_heading = float(my_tank_status.get("heading", 0.0) or 0.0)
         my_team = my_tank_status.get("_team")
+        print(f'{my_team=} {my_x=} {my_y=}')
 
         hp = float(my_tank_status.get("hp", 100.0) or 100.0)
         max_hp = float(my_tank_status.get("_max_hp", 100.0) or 100.0)
         hp_ratio = hp / max_hp if max_hp > 0 else 0.0
+        self.my_tank_id = str(my_tank_status.get("_id", "default"))
 
         top_speed = float(my_tank_status.get("_top_speed", 3.0) or 3.0)
         max_heading = float(my_tank_status.get("_heading_spin_rate", 30.0) or 30.0)
@@ -511,21 +790,37 @@ class SmartAgent:
 
         sensor = dict(sensor_data)
         seen_tanks = sensor_data.get("seen_tanks", [])
+        seen_allies: List[Any] = []
         if my_team is not None:
+            seen_allies = [tank for tank in seen_tanks if tank.get("team") == my_team and str(tank.get("id", tank.get("_id", ""))) != self.my_tank_id]
             sensor["seen_tanks"] = [tank for tank in seen_tanks if tank.get("team") is None or tank.get("team") != my_team]
         else:
             sensor["seen_tanks"] = seen_tanks
 
+        ammo_stocks = self._ammo_stocks(my_tank_status)
         self.model.decay_dead_ends()
-        self._update_world(my_x, my_y, sensor)
+        self._mark_allies_occupancy(my_x, my_y, seen_allies)
+        self._mark_enemy_occupancy(my_x, my_y, sensor.get("seen_tanks", []))
+        self._update_world(my_x, my_y, sensor, hp_ratio, ammo_stocks)
 
         enemies_visible = len(sensor.get("seen_tanks", [])) > 0
-        stuck_triggered = self.driver.update_stuck(my_x, my_y, enemies_visible, my_heading)
+        ally_blocking_front = self._ally_blocking_front(my_x, my_y, my_heading, seen_allies)
+        enemy_blocking_front = self._enemy_blocking_front(my_x, my_y, my_heading, sensor.get("seen_tanks", []))
+        enemy_close = self._closest_enemy(my_x, my_y, sensor)
+        ammo_to_load = self._choose_ammo_to_load(my_tank_status, enemy_close is not None and enemy_close[2] <= 22.0)
+        blocking_tank_in_front = ally_blocking_front or enemy_blocking_front
+        stuck_triggered = self.driver.update_stuck(
+            my_x, my_y, enemies_visible, my_heading, blocking_tank_in_front=blocking_tank_in_front
+        )
 
         hp_lost = 0.0
         if self.last_hp is not None:
             hp_lost = self.last_hp - hp
-            if 0.01 < hp_lost <= 12.0 and not enemies_visible:
+            if (
+                not DISABLE_ESCAPE_MODE
+                and 0.01 < hp_lost <= 12.0
+                and not enemies_visible
+            ):
                 cell = self.model.to_cell(my_x, my_y)
                 self.model.get_state(cell).danger += 3.0
                 self.model.mark_dead_end(cell, ttl=600.0)
@@ -537,8 +832,9 @@ class SmartAgent:
         if self.last_cell is not None and my_cell != self.last_cell:
             self.consecutive_danger_ticks = max(0, self.consecutive_danger_ticks - 4)
 
-        standing_on_danger = self._standing_on_danger(my_x, my_y, sensor)
-        if standing_on_danger:
+        live_hazard_now = self._standing_on_live_hazard(my_x, my_y, sensor)
+        standing_on_danger = live_hazard_now or self._standing_on_danger(my_x, my_y, sensor)
+        if standing_on_danger and not DISABLE_ESCAPE_MODE:
             self.consecutive_danger_ticks += 1
             cell = self.model.to_cell(my_x, my_y)
             self.model.get_state(cell).danger += 2.0
@@ -551,7 +847,8 @@ class SmartAgent:
             self.consecutive_danger_ticks = 0
 
         if (
-            self.driver.escape_ticks > 0
+            not DISABLE_ESCAPE_MODE
+            and self.driver.escape_ticks > 0
             and enemies_visible
             and not self._standing_on_live_hazard(my_x, my_y, sensor)
             and hp_ratio >= 0.52
@@ -563,7 +860,24 @@ class SmartAgent:
             self._clear_route_commit()
             standing_on_danger = False
 
-        if self.driver.escape_ticks > 0:
+        # Zawsze oblicz unikanie przeszkód i czołgów (potrzebne do niszczenia blokad i unikania deadlocku)
+        obstacle_avoid = self._reactive_obstacle_avoidance(my_x, my_y, my_heading, top_speed, sensor, seen_allies=seen_allies)
+
+        if live_hazard_now:
+            safe_patch = self._closest_non_hazard_point(my_x, my_y, sensor)
+            if safe_patch is not None and safe_patch[2] <= 34.0:
+                turn, speed = self.driver.drive_to_point(my_x, my_y, my_heading, safe_patch[0], safe_patch[1], top_speed)
+            elif obstacle_avoid is not None:
+                turn, speed = obstacle_avoid
+            else:
+                push_cell = self.driver.best_immediate_safe_neighbor(my_cell, allow_risky=True)
+                if push_cell is not None and push_cell != my_cell:
+                    turn, speed = self.driver.drive_to_cell(my_x, my_y, my_heading, push_cell, top_speed)
+                else:
+                    turn, speed = self.driver.escape_drive(my_x, my_y, my_heading, top_speed)
+            speed = max(speed, top_speed * 0.92)
+            mode = "panic_hazard_escape"
+        elif not DISABLE_ESCAPE_MODE and self.driver.escape_ticks > 0:
             escape_goal_cell = self._escape_target_cell(my_cell)
             if escape_goal_cell is not None and escape_goal_cell != self.model.to_cell(my_x, my_y):
                 self.current_goal = Goal(escape_goal_cell, "escape_route", 999.0)
@@ -577,7 +891,6 @@ class SmartAgent:
                     else:
                         break
 
-            obstacle_avoid = self._reactive_obstacle_avoidance(my_x, my_y, my_heading, top_speed, sensor)
             if obstacle_avoid is not None:
                 turn, speed = obstacle_avoid
                 mode = "emergency_escape_avoid"
@@ -602,89 +915,135 @@ class SmartAgent:
                     speed = max(speed, top_speed * 0.68)
                     mode = "emergency_push_out"
         else:
-            important_event = self._important_sensor_event(
-                standing_on_danger=standing_on_danger,
-                enemies_visible=enemies_visible,
-                hp_lost=hp_lost,
-                stuck_triggered=stuck_triggered,
-                sensor=sensor,
-                my_x=my_x,
-                my_y=my_y,
-            )
+            # Combat-first: engage in range, intercept when visible, checkpoint advance otherwise.
+            # Deadlock unblock: cofnij się gdy zablokowany przez inny czołg (ally lub enemy)
+            should_unblock = False
+            if stuck_triggered and (ally_blocking_front or enemy_blocking_front):
+                if ally_blocking_front:
+                    blocking_id = self._blocking_ally_id(my_x, my_y, my_heading, seen_allies)
+                    if blocking_id is not None and self.my_tank_id < blocking_id:
+                        should_unblock = True
+                elif enemy_blocking_front:
+                    should_unblock = True
+            if should_unblock:
+                self.driver.start_unblock()
 
-            obstacle_avoid = self._reactive_obstacle_avoidance(my_x, my_y, my_heading, top_speed, sensor)
-            if obstacle_avoid is not None:
+            ammo_loaded = my_tank_status.get("ammo_loaded")
+            firing_range = get_firing_range(ammo_loaded)
+            enemy_in_range = self._enemy_in_firing_range(my_x, my_y, sensor, firing_range)
+            closest_enemy = self._closest_enemy(my_x, my_y, sensor)
+
+            if self.driver.unblock_ticks > 0:
+                turn, speed = self.driver.unblock_drive(top_speed, add_turn=enemy_blocking_front)
+                mode = "unblock"
+                self.driver.path = []
+                self.current_goal = None
+            elif obstacle_avoid is not None:
                 turn, speed = obstacle_avoid
                 mode = "avoid_wall"
                 self.driver.path = []
                 self.current_goal = None
                 self._clear_route_commit()
-            else:
-                near_powerup = self._closest_powerup_position(my_x, my_y, sensor)
-                if near_powerup is not None and near_powerup[2] <= 15.0 and not standing_on_danger:
-                    turn, speed = self.driver.drive_to_point(my_x, my_y, my_heading, near_powerup[0], near_powerup[1], top_speed)
-                    mode = "pickup_direct"
-                    self.driver.path = []
-                    self.current_goal = None
-                    self._clear_route_commit()
-                else:
-                    goal: Optional[Goal] = None
-                    has_route_commit = (
-                        current_tick < self.route_commit_until
-                        and self.current_goal is not None
-                        and len(self.driver.path) > 0
-                    )
-
-                    if has_route_commit and not important_event:
-                        goal = self.current_goal
-                        mode = f"route_commit_{self.route_commit_mode or goal.mode}"
+            elif enemy_in_range:
+                mode = "engage_visible"
+                ex, ey, _ = enemy_in_range
+                turn, _ = self.driver.drive_to_point(my_x, my_y, my_heading, ex, ey, top_speed)
+                speed = top_speed * 0.25
+                self.driver.path = []
+                self.current_goal = None
+            elif closest_enemy is not None:
+                ex, ey, _ = closest_enemy
+                enemy_goal_cell = self.model.to_cell(ex, ey)
+                intercept_goal = Goal(enemy_goal_cell, "intercept_enemy", 980.0)
+                need_replan = (
+                    not self.driver.path
+                    or self.current_goal is None
+                    or self.current_goal.cell != enemy_goal_cell
+                    or current_tick >= self.replan_tick
+                    or stuck_triggered
+                )
+                if need_replan:
+                    self.driver.path = self.planner.build_path(my_cell, enemy_goal_cell, radius=30)
+                    self.replan_tick = current_tick + 8
+                    self.current_goal = intercept_goal
+                while self.driver.path:
+                    wx, wy = self.model.to_world_center(self.driver.path[0])
+                    if euclidean_distance(my_x, my_y, wx, wy) < 2.5:
+                        self.driver.path.pop(0)
                     else:
-                        goal = self.goal_selector.choose_goal(
-                            my_x=my_x,
-                            my_y=my_y,
-                            hp_ratio=hp_ratio,
-                            sensor=sensor,
-                            standing_on_danger_fn=lambda _x, _y, _sensor: standing_on_danger,
-                            to_cell_fn=lambda mode, pos: self._xy(pos),
-                            powerup_type_fn=self._powerup_type_text,
-                        )
-                        if goal is not None:
-                            self._update_path(my_x, my_y, goal, current_tick)
-                            if goal.mode == "attack" and not self.driver.path:
-                                safe = self.goal_selector.nearest_safe_cell(self.model.to_cell(my_x, my_y), require_known=True)
-                                if safe is not None:
-                                    safe_goal = Goal(safe, "reposition_safe", 650.0)
-                                    self._update_path(my_x, my_y, safe_goal, current_tick)
-                                    goal = safe_goal
-
-                            if self.driver.path:
-                                self._begin_route_commit(current_tick, goal.mode)
-                            else:
-                                self._clear_route_commit()
-                            mode = goal.mode
-                        else:
-                            self._clear_route_commit()
-
-                    if (goal is None or not self.driver.path) and not standing_on_danger:
-                        probe_goal = self._local_probe_goal(my_cell)
-                        if probe_goal is not None:
-                            self._update_path(my_x, my_y, probe_goal, current_tick)
-                            if self.driver.path:
-                                goal = probe_goal
-                                mode = probe_goal.mode
-                                self._begin_route_commit(current_tick, probe_goal.mode)
-
+                        break
+                if self.driver.path:
                     turn, speed = self.driver.drive_path(my_x, my_y, my_heading, top_speed)
+                else:
+                    turn, speed = self.driver.drive_to_point(my_x, my_y, my_heading, ex, ey, top_speed)
+                mode = "intercept_enemy"
+            else:
+                # Jedź wzdłuż checkpointów do wrogiej armii (lista per zespół, indeks per czołg)
+                tank_id = self.my_tank_id
+                team = my_team if my_team is not None else 1
+                checkpoints = self._get_checkpoints(team)
+                idx = self.checkpoint_index_by_tank.get(tank_id, -1)
+                if idx < 0 and checkpoints:
+                    idx = min(
+                        range(len(checkpoints)),
+                        key=lambda i: euclidean_distance(my_x, my_y, checkpoints[i][0], checkpoints[i][1]),
+                    )
+                    self.checkpoint_index_by_tank[tank_id] = idx
 
-                    if goal is not None and not self.driver.path:
-                        self._clear_route_commit()
-                        sidestep = self.driver.best_immediate_safe_neighbor(self.model.to_cell(my_x, my_y))
-                        if sidestep is not None:
-                            turn, speed = self.driver.drive_to_cell(my_x, my_y, my_heading, sidestep, top_speed)
-                            mode = f"{mode}_sidestep"
+                # Przejdź do następnego checkpointu jeśli dotarliśmy
+                while idx < len(checkpoints):
+                    cx, cy = checkpoints[idx]
+                    if euclidean_distance(my_x, my_y, cx, cy) < self.checkpoint_arrival_radius:
+                        idx += 1
+                        self.checkpoint_index_by_tank[tank_id] = idx
+                    else:
+                        break
+
+                if idx >= len(checkpoints):
+                    # Wszystkie checkpointy przejechane - jedź do ostatniego (głęboko w strefie wroga)
+                    idx = len(checkpoints) - 1
+                    self.checkpoint_index_by_tank[tank_id] = idx
+
+                if idx < len(checkpoints):
+                    cx, cy = self._lane_adjusted_checkpoint(tank_id, checkpoints[idx])
+                    goal_cell = self.model.to_cell(cx, cy)
+                    goal = Goal(goal_cell, "checkpoint", 999.0)
+                    # Checkpointy – A* preferuje ścieżki przez korytarz (obecny + następne 2)
+                    self.model.checkpoint_cells = set()
+                    for i in range(idx, min(idx + 3, len(checkpoints))):
+                        cxi, cyi = self._lane_adjusted_checkpoint(tank_id, checkpoints[i])
+                        self.model.checkpoint_cells.add(self.model.to_cell(cxi, cyi))
+                    # Planowanie A* – omija przeszkody, preferuje powerupy i checkpointy
+                    need_replan = (
+                        not self.driver.path
+                        or self.current_goal is None
+                        or self.current_goal.cell != goal_cell
+                        or current_tick >= self.replan_tick
+                        or stuck_triggered
+                    )
+                    if need_replan:
+                        self.driver.path = self.planner.build_path(my_cell, goal_cell, radius=28)
+                        self.replan_tick = current_tick + 15
+                        self.current_goal = goal
+                    # Usuń osiągnięte komórki ze ścieżki
+                    while self.driver.path:
+                        wx, wy = self.model.to_world_center(self.driver.path[0])
+                        if euclidean_distance(my_x, my_y, wx, wy) < 2.5:
+                            self.driver.path.pop(0)
                         else:
-                            turn, speed = self.driver.drive_to_cell(my_x, my_y, my_heading, goal.cell, top_speed * 0.9)
-                            mode = f"{mode}_direct"
+                            break
+                    if self.driver.path:
+                        turn, speed = self.driver.drive_path(my_x, my_y, my_heading, top_speed)
+                    else:
+                        turn, speed = self.driver.drive_to_point(my_x, my_y, my_heading, cx, cy, top_speed)
+                    if self.model.ally_occupancy_score(goal_cell) >= 0.2:
+                        speed = min(speed, top_speed * 0.55)
+                        mode = f"checkpoint_yield_{idx + 1}/{len(checkpoints)}"
+                    else:
+                        mode = f"checkpoint_{idx + 1}/{len(checkpoints)}"
+                else:
+                    turn, speed = 0.0, top_speed * 0.5
+                    mode = "patrol"
 
         barrel_rotation, should_fire = self.turret.update(
             my_x=my_x,
@@ -695,27 +1054,42 @@ class SmartAgent:
             max_barrel_rotation=max_barrel,
         )
 
-        # Policy change: do not fire while exploring/controlling lanes — only in attack modes
-        # or when an enemy is dangerously close (self-defense). This makes agents search
-        # for enemies without accidentally killing while casually exploring the map.
-        is_exploring_mode = (
-            (mode is not None and ("explore" in mode or "control_lane" in mode or "local_probe" in mode))
-            or (self.route_commit_mode and ("explore" in self.route_commit_mode or "control_lane" in self.route_commit_mode))
-        )
+        ammo_loaded = my_tank_status.get("ammo_loaded")
+        firing_range = get_firing_range(ammo_loaded)
+        enemy_in_range = self._enemy_in_firing_range(my_x, my_y, sensor, firing_range)
 
-        if is_exploring_mode:
-            # allow firing only in immediate self-defence (very close enemy)
-            closest_dist = None
-            for t in sensor.get("seen_tanks", []):
-                tx, ty = self._xy(t.get("position", t.get("_position", {}))) if isinstance(t, dict) else (getattr(t, "position").x, getattr(t, "position").y)
-                d = euclidean_distance(my_x, my_y, tx, ty)
-                if closest_dist is None or d < closest_dist:
-                    closest_dist = d
-            # threshold for defensive fire (units)
-            # use a stricter threshold so "explore" mode does not permit shooting at mid-range
-            DEFENSIVE_FIRE_DISTANCE = 8.0
-            if closest_dist is None or closest_dist > DEFENSIVE_FIRE_DISTANCE:
-                should_fire = False
+        # Gdy brak wrogów w zasięgu: niszcz zniszczalne przeszkody (drzewa, skrzynie) gdy blokują drogę
+        destructible = self._closest_destructible_obstacle(my_x, my_y, sensor, max_dist=firing_range)
+        obstacles_nearby = len(sensor.get("seen_obstacles", [])) >= 1
+        clear_path_needed = (
+            obstacle_avoid is not None
+            or stuck_triggered
+            or (
+                destructible is not None
+                and destructible[2] < 35.0
+                and obstacles_nearby
+                and self._obstacle_blocks_route(destructible[0], destructible[1])
+            )
+        )
+        if not enemy_in_range and destructible is not None and clear_path_needed:
+            ox, oy, _ = destructible
+            abs_angle = heading_to_angle_deg(my_x, my_y, ox, oy)
+            rel_angle = normalize_angle_diff(abs_angle, my_heading)
+            aim_error = normalize_angle_diff(rel_angle, barrel_angle)
+            barrel_rotation = self._clamp(aim_error, -max_barrel, max_barrel)
+            should_fire = abs(aim_error) <= 4.0
+        elif not enemy_in_range:
+            should_fire = False
+
+        ammo_loaded_now = str(my_tank_status.get("ammo_loaded", "") or "").upper()
+        if enemy_in_range and ammo_loaded_now == "LONG_DISTANCE":
+            # At long range prefer tighter alignment to limit wasted sniper shots.
+            should_fire = should_fire and abs(barrel_rotation) <= 3.0
+
+        if ally_blocking_front and not live_hazard_now:
+            speed = min(speed, top_speed * 0.52)
+            if mode.startswith("checkpoint") or mode == "patrol":
+                mode = "yield_ally"
 
         turn, speed = self._self_preserving_command(
             my_x=my_x,
@@ -742,8 +1116,12 @@ class SmartAgent:
             speed=speed,
         )
 
+        if live_hazard_now:
+            # Panic mode: prioritize leaving damaging terrain over cruise smoothing.
+            speed = max(speed, top_speed * 0.92)
+
         turn = self._clamp(turn, -max_heading, max_heading)
-        speed = self._clamp(speed, -top_speed, top_speed)
+        speed = self._clamp(speed, -top_speed, top_speed)  # Ujemna prędkość = cofanie (tryb unblock)
         barrel_rotation = self._clamp(barrel_rotation, -max_barrel, max_barrel)
         self.driver.last_move_cmd = speed
         self.last_cell = my_cell
@@ -759,6 +1137,7 @@ class SmartAgent:
             barrel_rotation_angle=barrel_rotation,
             heading_rotation_angle=turn,
             move_speed=speed,
+            ammo_to_load=ammo_to_load,
             should_fire=should_fire,
         )
 

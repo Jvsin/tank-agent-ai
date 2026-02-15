@@ -66,5 +66,11 @@ class AStarPlanner:
         risk = 0.0
         for cell in path:
             state = self.world_model.get_state(cell)
-            risk += 2.5 * state.danger + 3.0 * state.blocked - 0.2 * min(state.safe, 3.0)
+            risk += (
+                2.5 * state.danger
+                + 3.0 * state.blocked
+                + 2.2 * self.world_model.ally_occupancy_score(cell)
+                + 2.8 * self.world_model.enemy_occupancy_score(cell)
+                - 0.2 * min(state.safe, 3.0)
+            )
         return risk / max(1, len(path))
