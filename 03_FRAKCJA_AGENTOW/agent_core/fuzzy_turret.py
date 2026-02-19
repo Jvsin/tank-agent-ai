@@ -24,6 +24,12 @@ COOLDOWN_TICKS = 10
 AIMING_THRESHOLD_TIGHT = 2.5
 FIRE_CONFIDENCE_THRESHOLD = 0.6
 
+AMMO_SPECS: dict[str, dict[str, float]] = {
+    "HEAVY": {"range": 25.0, "damage": 40.0, "reload": 10.0},
+    "LIGHT": {"range": 50.0, "damage": 20.0, "reload": 5.0},
+    "LONG_DISTANCE": {"range": 100.0, "damage": 25.0, "reload": 10.0},
+}
+
 
 class FuzzyTurretController:
     """
@@ -370,6 +376,55 @@ class FuzzyTurretController:
         except Exception:
             return float(max(-max_rotation, min(max_rotation, 22.0)))
 
+    @staticmethod
+    def select_ammo(
+        enemy_distance: Optional[float],
+        ammo_stocks: dict[str, int],
+        current_ammo: Optional[str],
+    ) -> Optional[str]:
+        """Pick the best ammo type for the given enemy distance and stock levels.
+
+        Returns the ammo name to load, or ``None`` if the current ammo is already
+        the best choice (or nothing useful is available).
+        """
+        if not ammo_stocks:
+            return None
+
+        current_ammo = (current_ammo or "").upper()
+
+        candidates: list[tuple[float, str]] = []
+        for name, spec in AMMO_SPECS.items():
+            count = ammo_stocks.get(name, 0)
+            if count <= 0:
+                continue
+
+            if enemy_distance is not None and enemy_distance > spec["range"]:
+                continue
+
+            score = spec["damage"]
+            if enemy_distance is not None:
+                range_ratio = enemy_distance / spec["range"]
+                if range_ratio > 0.85:
+                    score *= 0.7
+                elif range_ratio < 0.5:
+                    score *= 1.15
+            score += min(count, 10) * 0.5
+            candidates.append((score, name))
+
+        if not candidates:
+            for name in ("LIGHT", "LONG_DISTANCE", "HEAVY"):
+                if ammo_stocks.get(name, 0) > 0:
+                    if name == current_ammo:
+                        return None
+                    return name
+            return None
+
+        candidates.sort(key=lambda t: -t[0])
+        best = candidates[0][1]
+        if best == current_ammo:
+            return None
+        return best
+
     def update(
         self,
         my_x: float,
@@ -378,20 +433,25 @@ class FuzzyTurretController:
         current_barrel_angle: float,
         seen_tanks: List[Any],
         max_barrel_rotation: float,
-    ) -> Tuple[float, bool]:
+        ammo_stocks: Optional[dict[str, int]] = None,
+        current_ammo: Optional[str] = None,
+    ) -> Tuple[float, bool, Optional[str]]:
+        """Returns ``(barrel_rotation, should_fire, ammo_to_load)``."""
         if self.cooldown_ticks > 0:
             self.cooldown_ticks -= 1
 
         if not seen_tanks:
             rotation = self._adaptive_scan(current_barrel_angle, max_barrel_rotation)
-            return rotation, False
+            ammo = self.select_ammo(None, ammo_stocks or {}, current_ammo)
+            return rotation, False, ammo
 
         self.ticks_since_last_seen = 0
 
         target = self._select_target(my_x, my_y, seen_tanks)
         if target is None:
             rotation = self._adaptive_scan(current_barrel_angle, max_barrel_rotation)
-            return rotation, False
+            ammo = self.select_ammo(None, ammo_stocks or {}, current_ammo)
+            return rotation, False, ammo
 
         target_x, target_y = to_xy(
             target.get("position", {})
@@ -420,5 +480,6 @@ class FuzzyTurretController:
         if should_fire:
             self.cooldown_ticks = COOLDOWN_TICKS
 
-        # Ensure native python return types to avoid numpy scalar leakage
-        return float(rotation), bool(should_fire)
+        ammo = self.select_ammo(distance, ammo_stocks or {}, current_ammo)
+
+        return float(rotation), bool(should_fire), ammo
