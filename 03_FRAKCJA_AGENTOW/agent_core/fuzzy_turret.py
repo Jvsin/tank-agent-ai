@@ -60,11 +60,20 @@ class FuzzyTurretController:
         self._init_adaptive_scan_fuzzy()
 
     def _init_target_selection_fuzzy(self):
-        distance = ctrl.Antecedent(np.arange(0, 151, 1), "distance")
-        distance["very_close"] = fuzz.trapmf(distance.universe, [0, 0, 15, 30])
-        distance["close"] = fuzz.trimf(distance.universe, [15, 35, 55])
-        distance["medium"] = fuzz.trimf(distance.universe, [40, 70, 100])
-        distance["far"] = fuzz.trapmf(distance.universe, [80, 110, 150, 150])
+        max_dist = max(self.vision_range * 1.5, 30)
+        distance = ctrl.Antecedent(np.arange(0, max_dist + 1, 1), "distance")
+        
+        very_close_max = self.vision_range * 0.3
+        close_min = self.vision_range * 0.2
+        close_max = self.vision_range * 0.6
+        medium_min = self.vision_range * 0.5
+        medium_max = self.vision_range * 1.0
+        far_min = self.vision_range * 0.8
+        
+        distance["very_close"] = fuzz.trapmf(distance.universe, [0, 0, very_close_max * 0.5, very_close_max])
+        distance["close"] = fuzz.trimf(distance.universe, [close_min, (close_min + close_max) / 2, close_max])
+        distance["medium"] = fuzz.trimf(distance.universe, [medium_min, (medium_min + medium_max) / 2, medium_max])
+        distance["far"] = fuzz.trapmf(distance.universe, [far_min, medium_max, max_dist, max_dist])
 
         threat = ctrl.Antecedent(np.arange(0, 11, 1), "threat")
         threat["low"] = fuzz.trimf(threat.universe, [0, 0, 5])
@@ -104,10 +113,17 @@ class FuzzyTurretController:
         angle_error["medium"] = fuzz.trimf(angle_error.universe, [10, 30, 60])
         angle_error["large"] = fuzz.trapmf(angle_error.universe, [45, 90, 180, 180])
 
-        target_dist = ctrl.Antecedent(np.arange(0, 151, 1), "target_distance")
-        target_dist["close"] = fuzz.trapmf(target_dist.universe, [0, 0, 30, 50])
-        target_dist["medium"] = fuzz.trimf(target_dist.universe, [40, 70, 100])
-        target_dist["far"] = fuzz.trapmf(target_dist.universe, [80, 120, 150, 150])
+        max_dist = max(self.vision_range * 1.5, 30)
+        target_dist = ctrl.Antecedent(np.arange(0, max_dist + 1, 1), "target_distance")
+        
+        close_max = self.vision_range * 0.5
+        medium_min = self.vision_range * 0.4
+        medium_max = self.vision_range * 0.9
+        far_min = self.vision_range * 0.7
+        
+        target_dist["close"] = fuzz.trapmf(target_dist.universe, [0, 0, close_max * 0.6, close_max])
+        target_dist["medium"] = fuzz.trimf(target_dist.universe, [medium_min, (medium_min + medium_max) / 2, medium_max])
+        target_dist["far"] = fuzz.trapmf(target_dist.universe, [far_min, medium_max, max_dist, max_dist])
 
         speed_factor = ctrl.Consequent(np.arange(0, 1.01, 0.01), "speed_factor")
         speed_factor["very_slow"] = fuzz.trimf(speed_factor.universe, [0, 0, 0.25])
@@ -146,12 +162,20 @@ class FuzzyTurretController:
         aiming_error["acceptable"] = fuzz.trimf(aiming_error.universe, [3, 5, 7])
         aiming_error["poor"] = fuzz.trapmf(aiming_error.universe, [6, 8, 10, 10])
 
-        firing_dist = ctrl.Antecedent(np.arange(0, 151, 1), "firing_distance")
+        max_dist = max(self.vision_range * 1.5, 30)
+        firing_dist = ctrl.Antecedent(np.arange(0, max_dist + 1, 1), "firing_distance")
+        
+        optimal_peak = min(self.vision_range * 0.5, OPTIMAL_ENGAGEMENT_RANGE)
+        optimal_end = self.vision_range * 0.7
+        suboptimal_mid = self.vision_range * 0.9
+        suboptimal_end = self.vision_range * 1.2
+        extreme_start = self.vision_range * 1.0
+        
         firing_dist["optimal"] = fuzz.trimf(
-            firing_dist.universe, [0, OPTIMAL_ENGAGEMENT_RANGE, 80]
+            firing_dist.universe, [0, optimal_peak, optimal_end]
         )
-        firing_dist["suboptimal"] = fuzz.trimf(firing_dist.universe, [60, 90, 120])
-        firing_dist["extreme"] = fuzz.trapmf(firing_dist.universe, [100, 130, 150, 150])
+        firing_dist["suboptimal"] = fuzz.trimf(firing_dist.universe, [optimal_end * 0.8, suboptimal_mid, suboptimal_end])
+        firing_dist["extreme"] = fuzz.trapmf(firing_dist.universe, [extreme_start, suboptimal_end, max_dist, max_dist])
 
         vulnerability = ctrl.Antecedent(np.arange(0, 1.01, 0.01), "vulnerability")
         vulnerability["resilient"] = fuzz.trimf(vulnerability.universe, [0, 0, 0.4])
@@ -274,7 +298,8 @@ class FuzzyTurretController:
             threat_level = THREAT_WEIGHTS.get(tank_type, 5)
 
             try:
-                self.target_selection_sim.input["distance"] = min(distance, 150)
+                max_dist = max(self.vision_range * 1.5, 30)
+                self.target_selection_sim.input["distance"] = min(distance, max_dist)
                 self.target_selection_sim.input["threat"] = threat_level
                 self.target_selection_sim.compute()
                 priority = self.target_selection_sim.output["priority"]
@@ -302,8 +327,9 @@ class FuzzyTurretController:
         distance: float,
     ) -> float:
         try:
+            max_dist = max(self.vision_range * 1.5, 30)
             self.rotation_speed_sim.input["angle_error"] = min(abs(angle_error), 180)
-            self.rotation_speed_sim.input["target_distance"] = min(distance, 150)
+            self.rotation_speed_sim.input["target_distance"] = min(distance, max_dist)
             self.rotation_speed_sim.compute()
             # cast to native float (skfuzzy may return numpy scalar)
             return float(self.rotation_speed_sim.output["speed_factor"])
@@ -328,11 +354,13 @@ class FuzzyTurretController:
             vulnerability_score = 0.5
             if is_damaged:
                 vulnerability_score = 0.9
-            if distance < 30:
+            close_threshold = self.vision_range * 0.3
+            if distance < close_threshold:
                 vulnerability_score = min(1.0, vulnerability_score + 0.2)
 
+            max_dist = max(self.vision_range * 1.5, 30)
             self.firing_decision_sim.input["aiming_error"] = min(abs(angle_error), 10)
-            self.firing_decision_sim.input["firing_distance"] = min(distance, 150)
+            self.firing_decision_sim.input["firing_distance"] = min(distance, max_dist)
             self.firing_decision_sim.input["vulnerability"] = vulnerability_score
             self.firing_decision_sim.compute()
 
