@@ -68,7 +68,7 @@ class TestFuzzyTurretController(unittest.TestCase):
     
     def test_no_enemies_scanning(self):
         """Test turret scans when no enemies are visible."""
-        rotation, should_fire = self.controller.update(
+        rotation, should_fire, _ = self.controller.update(
             my_x=self.my_x,
             my_y=self.my_y,
             my_heading=self.my_heading,
@@ -89,7 +89,7 @@ class TestFuzzyTurretController(unittest.TestCase):
         # Enemy directly ahead (north) at distance 30
         enemy = create_mock_tank_dict(50.0, 80.0, "LIGHT", False)
         
-        rotation, should_fire = self.controller.update(
+        rotation, should_fire, _ = self.controller.update(
             my_x=self.my_x,
             my_y=self.my_y,
             my_heading=self.my_heading,
@@ -135,7 +135,7 @@ class TestFuzzyTurretController(unittest.TestCase):
         enemy = create_mock_tank_dict(50.0, 20.0, "LIGHT", False)
         
         max_allowed = 30.0
-        rotation, _ = self.controller.update(
+        rotation, _, _ = self.controller.update(
             my_x=self.my_x,
             my_y=self.my_y,
             my_heading=self.my_heading,
@@ -152,7 +152,7 @@ class TestFuzzyTurretController(unittest.TestCase):
         enemy = create_mock_tank_dict(50.0, 52.5, "LIGHT", False)  # Very close and aligned
         
         # First shot
-        _, fired1 = self.controller.update(
+        _, fired1, _ = self.controller.update(
             my_x=self.my_x,
             my_y=self.my_y,
             my_heading=self.my_heading,
@@ -166,7 +166,7 @@ class TestFuzzyTurretController(unittest.TestCase):
             self.assertGreater(self.controller.cooldown_ticks, 0)
             
             # Immediate next call should not fire
-            _, fired2 = self.controller.update(
+            _, fired2, _ = self.controller.update(
                 my_x=self.my_x,
                 my_y=self.my_y,
                 my_heading=self.my_heading,
@@ -225,7 +225,7 @@ class TestFuzzyTurretController(unittest.TestCase):
         last_dir = self.controller.last_seen_direction
         
         # Enemy disappears
-        rotation, _ = self.controller.update(
+        rotation, _, _ = self.controller.update(
             my_x=self.my_x,
             my_y=self.my_y,
             my_heading=self.my_heading,
@@ -315,7 +315,7 @@ class TestFuzzyTurretController(unittest.TestCase):
     
     def test_returns_tuple_of_float_and_bool(self):
         """Test that update method returns correct types."""
-        rotation, should_fire = self.controller.update(
+        rotation, should_fire, ammo = self.controller.update(
             my_x=self.my_x,
             my_y=self.my_y,
             my_heading=self.my_heading,
@@ -352,7 +352,7 @@ class TestFuzzyTurretIntegration(unittest.TestCase):
         
         # Simulate multiple ticks until lock and fire
         for tick in range(20):
-            rotation, should_fire = self.controller.update(
+            rotation, should_fire, _ = self.controller.update(
                 my_x=my_x,
                 my_y=my_y,
                 my_heading=my_heading,

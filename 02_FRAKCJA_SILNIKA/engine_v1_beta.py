@@ -41,6 +41,11 @@ try:
     from backend.tank.light_tank import LightTank
     from backend.structures.position import Position
 
+    agents_dir = os.path.join(main_dir, '03_FRAKCJA_AGENTOW')
+    if agents_dir not in sys.path:
+        sys.path.insert(0, agents_dir)
+    from agent_core.checkpoints import STATIC_CORRIDOR_CHECKPOINTS
+
 except ImportError as e:
     print(f"Błąd importu: {e}")
     print("Upewnij się, że skrypt jest uruchamiany z katalogu '02_FRAKCJA_SILNIKA' lub że struktura projektu jest poprawna.")
@@ -52,9 +57,7 @@ MAP_SEED = "advanced_road_trees.csv"
 TARGET_FPS = 60
 SCALE = 5  # Współczynnik skalowania grafiki (wszystko będzie 4x większe)
 TILE_SIZE = 10  # To MUSI być zgodne z domyślną wartością w map_loader.py
-AGENT_NAME = "final_agent.py"
-TANK_LOG_EVERY = 10  # Log every N ticks (set higher to reduce spam)
-MISSING_AGENT_LOG_EVERY = 10  # Log missing agent responses every N ticks
+AGENT_NAME = "simple_driver_agent.py"
 
 ASSETS_BASE_PATH = os.path.join(current_file_dir, 'frontend', 'assets')
 TILE_ASSETS_PATH = os.path.join(ASSETS_BASE_PATH, 'tiles')
@@ -162,7 +165,7 @@ def load_assets():
         'tanks': {},
         'icons': {}
     }
-    # print("--- Ładowanie zasobów graficznych ---")
+    print("--- Ładowanie zasobów graficznych ---")
 
     # Kafelki
     tile_names = ['Wall', 'Tree', 'AntiTankSpike', 'Grass', 'Road', 'Swamp', 'PotholeRoad', 'Water']
@@ -173,8 +176,7 @@ def load_assets():
             # Skalujemy asset do docelowego rozmiaru
             assets['tiles'][name] = pygame.transform.scale(img, (TILE_SIZE * SCALE, TILE_SIZE * SCALE))
         except pygame.error:
-            # print(f"[!] Nie znaleziono assetu dla kafelka: {name}")
-            pass
+            print(f"[!] Nie znaleziono assetu dla kafelka: {name}")
 
     # Power-upy
     powerup_names = ['Medkit', 'Shield', 'Overcharge', 'AmmoBox_Heavy', 'AmmoBox_Light', 'AmmoBox_Sniper']
@@ -185,8 +187,7 @@ def load_assets():
             img = pygame.image.load(path).convert_alpha()
             assets['powerups'][name] = pygame.transform.scale(img, powerup_render_size)
         except pygame.error:
-            # print(f"[!] Nie znaleziono assetu dla power-upa: {name}")
-            pass
+            print(f"[!] Nie znaleziono assetu dla power-upa: {name}")
 
     # Czołgi
     tank_render_size = (TILE_SIZE * SCALE, TILE_SIZE * SCALE)
@@ -201,8 +202,7 @@ def load_assets():
                 'mask_turret': pygame.transform.scale(pygame.image.load(os.path.join(base_path, 'msk2.png')).convert_alpha(), tank_render_size),
             }
         except pygame.error:
-            # print(f"[!] Nie znaleziono assetów dla czołgu: {tank_type}")
-            pass
+            print(f"[!] Nie znaleziono assetów dla czołgu: {tank_type}")
             
     # Ikony
     icon_render_size = (128, 64)
@@ -215,11 +215,10 @@ def load_assets():
             assets['icons'][tank_type] = pygame.transform.scale(img, icon_render_size)
         except pygame.error:
             # Jeśli nie ma ikony, stwórz pusty placeholder, żeby uniknąć błędów
-            # print(f"[!] Nie znaleziono assetu dla ikony: {icon_filename}")
+            print(f"[!] Nie znaleziono assetu dla ikony: {icon_filename}")
             assets['icons'][tank_type] = pygame.Surface(icon_render_size, pygame.SRCALPHA)
-            pass
 
-    # print("--- Ładowanie zakończone ---")
+    print("--- Ładowanie zakończone ---")
     return assets
 
 def draw_tank(surface: pygame.Surface, tank: Tank, assets: Dict, scale: int, map_height: int):
@@ -302,7 +301,7 @@ def draw_shot_effect(surface: pygame.Surface, start_pos: Dict, end_pos: Dict, li
 
 def create_background_surface(map_info: Any, assets: Dict, scale: int, width: int, height: int) -> pygame.Surface:
     """Tworzy i zwraca powierzchnię z narysowaną statyczną mapą (teren + przeszkody)."""
-    # print("--- Tworzenie pre-renderowanego tła mapy ---")
+    print("--- Tworzenie pre-renderowanego tła mapy ---")
     background = pygame.Surface((width, height))
     background.fill(BACKGROUND_COLOR)
 
@@ -319,7 +318,7 @@ def create_background_surface(map_info: Any, assets: Dict, scale: int, width: in
             top_left = (pos_x - asset.get_width() / 2, pos_y - asset.get_height() / 2)
             background.blit(asset, top_left)
     
-    # print("--- Tło mapy utworzone ---")
+    print("--- Tło mapy utworzone ---")
     return background
 
 def draw_ui(screen: pygame.Surface, font: pygame.font.Font, game_loop: GameLoop, window_width: int, map_rect: pygame.Rect, assets: Dict):
@@ -529,7 +528,6 @@ def draw_ui(screen: pygame.Surface, font: pygame.font.Font, game_loop: GameLoop,
 
 def draw_debug_info(screen: pygame.Surface, font: pygame.font.Font, clock: pygame.time.Clock, current_tick: int):
     """Rysuje informacje debugowe (FPS, Tick) w lewym górnym rogu."""
-    # Użyj mniejszej czcionki dla informacji debugowych
     debug_font = pygame.font.Font(None, 24)
     
     fps_text = f"FPS: {clock.get_fps():.1f}"
@@ -542,47 +540,33 @@ def draw_debug_info(screen: pygame.Surface, font: pygame.font.Font, clock: pygam
     screen.blit(tick_surf, (10, 30))
 
 
-def log_tank_actions(current_tick: int, game_loop: GameLoop, every_n_ticks: int = 1):
-    """Log per-tank actions returned by agents for debugging movement."""
-    if every_n_ticks <= 0:
+def draw_checkpoints(surface: pygame.Surface, scale: int, map_render_height: int):
+    """Draws STATIC_CORRIDOR_CHECKPOINTS as numbered circles connected by lines."""
+    if not STATIC_CORRIDOR_CHECKPOINTS:
         return
-    if current_tick % every_n_ticks != 0:
-        return
-    actions = getattr(game_loop, "last_actions", {})
-    if not actions:
-        return
-    for tank_id, action in actions.items():
-        if action is None:
-            continue
-        print(
-            f"[TANK] tick={current_tick} id={tank_id} "
-            f"move={action.move_speed:.2f} "
-            f"turn={action.heading_rotation_angle:.2f} "
-            f"barrel={action.barrel_rotation_angle:.2f} "
-            f"fire={action.should_fire}"
-        )
 
+    CP_COLOR = (0, 255, 180)
+    LINE_COLOR = (0, 180, 120)
+    RADIUS = 6
+    cp_font = pygame.font.Font(None, 20)
 
-def log_missing_agent_responses(current_tick: int, game_loop: GameLoop, every_n_ticks: int = 1):
-    """Log tanks that did not return actions on this tick."""
-    if every_n_ticks <= 0:
-        return
-    if current_tick % every_n_ticks != 0:
-        return
-    actions = getattr(game_loop, "last_actions", {})
-    alive_tanks = [
-        tank_id for tank_id, tank in game_loop.tanks.items()
-        if tank.is_alive()
+    scaled = [
+        (int(cx * scale), int(map_render_height - cy * scale))
+        for cx, cy in STATIC_CORRIDOR_CHECKPOINTS
     ]
-    missing = [tank_id for tank_id in alive_tanks if tank_id not in actions]
-    if missing:
-        print(f"[MISSING] tick={current_tick} no action from: {', '.join(missing)}")
 
+    for i in range(len(scaled) - 1):
+        pygame.draw.line(surface, LINE_COLOR, scaled[i], scaled[i + 1], 2)
+
+    for idx, (sx, sy) in enumerate(scaled):
+        pygame.draw.circle(surface, CP_COLOR, (sx, sy), RADIUS, 2)
+        label = cp_font.render(str(idx + 1), True, CP_COLOR)
+        surface.blit(label, (sx + RADIUS + 2, sy - 8))
 
 
 def main():
     """Główna funkcja uruchamiająca symulację z grafiką."""
-    # print("--- Uruchamianie symulacji w trybie graficznym ---")
+    print("--- Uruchamianie symulacji w trybie graficznym ---")
     set_log_level(LOG_LEVEL)
 
     agent_processes = []
@@ -590,7 +574,7 @@ def main():
     agent_script_path = os.path.join(main_dir, '03_FRAKCJA_AGENTOW', AGENT_NAME)
 
     if not os.path.exists(agent_script_path):
-        # print(f"BŁĄD: Nie znaleziono skryptu agenta w: {agent_script_path}")
+        print(f"BŁĄD: Nie znaleziono skryptu agenta w: {agent_script_path}")
         return
 
     # --- Inicjalizacja Gry ---
@@ -598,17 +582,16 @@ def main():
 
     try:
         # 1. Uruchomienie serwerów agentów (teraz używamy random_agent.py)
-        # print(f"Uruchamianie {total_tanks} serwerów agentów...")
+        print(f"Uruchamianie {total_tanks} serwerów agentów...")
         for i in range(total_tanks):
             port = AGENT_BASE_PORT + i
             name = f"Bot_{i+1}"
             command = [sys.executable, agent_script_path, "--port", str(port), "--name", name]
-            # ZMIANA: Pozostaw stdout/stderr widoczne żeby widzieć błędy agentów
-            proc = subprocess.Popen(command)
+            proc = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             agent_processes.append(proc)
-            # print(f"  -> Agent '{name}' uruchomiony na porcie {port} (PID: {proc.pid})")
+            print(f"  -> Agent '{name}' uruchomiony na porcie {port} (PID: {proc.pid})")
 
-        # print("\nOczekiwanie 3 sekundy na start serwerów agentów...")
+        print("\nOczekiwanie 3 sekundy na start serwerów agentów...")
         time.sleep(3)
 
         # 2. Inicjalizacja silnika gry
@@ -622,9 +605,7 @@ def main():
         map_render_height = map_engine_height * SCALE
 
         # Ustaw okno na pełny ekran
-        # screen = pygame.display.set_mode((0, 0), pygame.RESIZABLE)
-        # Make screen 800x600
-        screen = pygame.display.set_mode((1920, 1080))
+        screen = pygame.display.set_mode((0, 0), pygame.RESIZABLE)
         window_width, window_height = screen.get_size()
         pygame.display.set_caption("Symulator Walk Czołgów")
         clock = pygame.time.Clock()
@@ -640,30 +621,26 @@ def main():
         background_surface = create_background_surface(game_loop.map_info, assets, SCALE, map_render_width, map_render_height)
 
         # --- Wyświetlanie informacji o spawnie ---
-        # print("\n--- Informacje o Spawnie ---")
-        # print("Zespawnowane czołgi:")
+        print("\n--- Informacje o Spawnie ---")
+        print("Zespawnowane czołgi:")
         if game_loop.tanks:
             # Sortowanie dla czytelności
             sorted_tanks = sorted(game_loop.tanks.values(), key=lambda t: t._id)
             for tank in sorted_tanks:
-                pass
-                # print(f"  - Czołg: {tank._id} (Team: {tank.team}, Typ: {tank._tank_type}) na pozycji ({tank.position.x:.1f}, {tank.position.y:.1f})")
+                print(f"  - Czołg: {tank._id} (Team: {tank.team}, Typ: {tank._tank_type}) na pozycji ({tank.position.x:.1f}, {tank.position.y:.1f})")
         else:
-            # print("  Brak czołgów.")
-            pass
+            print("  Brak czołgów.")
 
-        # print("\nZespawnowane power-upy:")
+        print("\nZespawnowane power-upy:")
         if game_loop.map_info and game_loop.map_info.powerup_list:
             for powerup in game_loop.map_info.powerup_list:
-                pass
-                # print(f"  - Power-up: {powerup.powerup_type.name} na pozycji ({powerup.position.x:.1f}, {powerup.position.y:.1f})")
+                print(f"  - Power-up: {powerup.powerup_type.name} na pozycji ({powerup.position.x:.1f}, {powerup.position.y:.1f})")
         else:
-            # print("  Brak power-upów na mapie.")
-            pass
+            print("  Brak power-upów na mapie.")
 
         # --- TEST DIAGNOSTYCZNY: Wyświetlenie zamrożonej mapy i UI ---
-        # print("\n--- TEST: Wyświetlanie statycznej mapy i interfejsu ---")
-        # print("--- Naciśnij SPACJĘ, aby rozpocząć symulację ---")
+        print("\n--- TEST: Wyświetlanie statycznej mapy i interfejsu ---")
+        print("--- Naciśnij SPACJĘ, aby rozpocząć symulację ---")
 
         running = True
         waiting_for_start = True
@@ -679,10 +656,11 @@ def main():
                 break
 
             screen.fill(BACKGROUND_COLOR)
-            map_surface.blit(background_surface, (0, 0)) # Narysuj tło na powierzchni mapy
-            screen.blit(map_surface, map_rect) # Narysuj powierzchnię mapy na ekranie
-            draw_ui(screen, font, game_loop, window_width, map_rect, assets) # Narysuj UI
-            draw_debug_info(screen, font, clock, 0) # Pokaż info debugowe
+            map_surface.blit(background_surface, (0, 0))
+            draw_checkpoints(map_surface, SCALE, map_render_height)
+            screen.blit(map_surface, map_rect)
+            draw_ui(screen, font, game_loop, window_width, map_rect, assets)
+            draw_debug_info(screen, font, clock, 0)
 
             # --- DODANE: Pulsujący napis "Press SPACE to start" ---
             # Używamy sinusa do uzyskania płynnej pulsacji alpha (przezroczystości)
@@ -702,7 +680,7 @@ def main():
         if not running:
             raise SystemExit("Wyjście z programu na życzenie użytkownika.")
 
-        # print("--- Rozpoczynanie właściwej symulacji... ---")
+        print("--- Rozpoczynanie właściwej symulacji... ---")
 
         # 4. Start pętli w GameCore - kluczowy krok pominięty wcześniej
         if not game_loop.game_core.start_game_loop():
@@ -712,7 +690,7 @@ def main():
         explosion_particles = [] # Lista do przechowywania cząsteczek eksplozji
 
         # --- Główna Pętla Gry i Renderowania ---
-        # print("\n--- Rozpoczynanie pętli gry ---")
+        print("\n--- Rozpoczynanie pętli gry ---")
         running = True
         while running:
             for event in pygame.event.get():
@@ -728,9 +706,6 @@ def main():
             # Ta jedna metoda załatwia wszystko: zapytania do agentów, fizykę, zgony.
             tick_info = game_loop._process_game_tick()
             current_tick = tick_info["tick"]
-
-            log_tank_actions(current_tick, game_loop, TANK_LOG_EVERY)
-            log_missing_agent_responses(current_tick, game_loop, MISSING_AGENT_LOG_EVERY)
 
             # --- KROK 3: Przetwarzanie wyników fizyki dla celów wizualnych ---
             physics_results = game_loop.last_physics_results
@@ -816,6 +791,7 @@ def main():
 
             # Rysuj tło na powierzchni mapy (czyści poprzednią klatkę)
             map_surface.blit(background_surface, (0, 0))
+            draw_checkpoints(map_surface, SCALE, map_render_height)
             # Rysowanie power-upów
             for powerup in game_loop.map_info.powerup_list:
                 asset_key = POWERUP_ASSET_MAP.get(powerup._powerup_type.name)
@@ -860,50 +836,47 @@ def main():
             clock.tick(TARGET_FPS)
 
         # --- Koniec Pętli ---
-        # print("--- Pętla gry zakończona ---")
+        print("--- Pętla gry zakończona ---")
 
         # Wyświetl wyniki w konsoli
         game_results = game_loop.game_core.end_game("normal")
         game_results["scoreboards"] = game_loop._get_final_scoreboards()
 
-        # print("\n--- Wyniki Gry ---")
+        print("\n--- Wyniki Gry ---")
         if game_results.get("winner_team"):
-            pass
-            # print(f"🏆 Zwycięzca: Drużyna {game_results.get('winner_team')}")
+            print(f"🏆 Zwycięzca: Drużyna {game_results.get('winner_team')}")
         else:
-            # print("🤝 Remis")
-            pass
-        # print(f"Całkowita liczba ticków: {game_results.get('total_ticks')}")
+            print("🤝 Remis")
+        print(f"Całkowita liczba ticków: {game_results.get('total_ticks')}")
 
         scoreboards = game_results.get("scoreboards", [])
         if scoreboards:
             scoreboards.sort(key=lambda x: (x.get('team', 0), -x.get('tanks_killed', 0)))
             for score in scoreboards:
-                    # print(f"  - Czołg: {score.get('tank_id')}, Drużyna: {score.get('team')}, "
-                    #       f"Zabójstwa: {score.get('tanks_killed')}, Obrażenia: {score.get('damage_dealt', 0):.0f}")
-                    pass
+                print(f"  - Czołg: {score.get('tank_id')}, Drużyna: {score.get('team')}, "
+                      f"Zabójstwa: {score.get('tanks_killed')}, Obrażenia: {score.get('damage_dealt', 0):.0f}")
 
         # Daj chwilę na przeczytanie wyników przed zamknięciem
         time.sleep(5)
 
     except Exception as e:
-        # print(f"\n--- KRYTYCZNY BŁĄD W PĘTLI GRY ---")
+        print(f"\n--- KRYTYCZNY BŁĄD W PĘTLI GRY ---")
         import traceback
         traceback.print_exc()
 
     finally:
         # --- Sprzątanie ---
         # Dodajemy pustą linię, aby nie nadpisać ostatniego logu z pętli
-        # print("\n\n--- Zamykanie zasobów ---")
+        print("\n\n--- Zamykanie zasobów ---")
         game_loop.cleanup_game()
 
-        # print("Zamykanie serwerów agentów...")
+        print("Zamykanie serwerów agentów...")
         for proc in agent_processes:
             proc.terminate()
-            # print(f"  -> Zatrzymano proces agenta (PID: {proc.pid})")
+            print(f"  -> Zatrzymano proces agenta (PID: {proc.pid})")
 
         pygame.quit()
-        # print("\n--- Zakończono symulację ---")
+        print("\n--- Zakończono symulację ---")
 
 if __name__ == "__main__":
     main()

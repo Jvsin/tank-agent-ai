@@ -912,8 +912,20 @@ class GameLoop:
             return
 
         # Convert action dicts to ActionCommand-like objects
-        from controller.api import ActionCommand
-        
+        from controller.api import ActionCommand, AmmoType
+
+        def _parse_ammo_to_load(raw: Any) -> Optional[Any]:
+            """Parse ammo_to_load from agent response (string) to AmmoType."""
+            if raw is None:
+                return None
+            s = str(raw).strip().upper()
+            if not s:
+                return None
+            try:
+                return AmmoType[s]
+            except (KeyError, TypeError):
+                return None
+
         actions_converted = {}
         for tank_id, action_dict in agent_actions.items():
             try:
@@ -921,7 +933,7 @@ class GameLoop:
                     barrel_rotation_angle=action_dict.get("barrel_rotation_angle", 0.0),
                     heading_rotation_angle=action_dict.get("heading_rotation_angle", 0.0),
                     move_speed=action_dict.get("move_speed", 0.0),
-                    ammo_to_load=None,  # TODO: Parse ammo type
+                    ammo_to_load=_parse_ammo_to_load(action_dict.get("ammo_to_load")),
                     should_fire=action_dict.get("should_fire", False)
                 )
             except Exception as e:

@@ -270,6 +270,32 @@ class FuzzyTurretController:
         self.adaptive_scan_ctrl = ctrl.ControlSystem(rules)
         self.adaptive_scan_sim = ctrl.ControlSystemSimulation(self.adaptive_scan_ctrl)
 
+    def _select_destructible_obstacle(
+        self,
+        my_x: float,
+        my_y: float,
+        seen_obstacles: List[Any],
+    ) -> Optional[Any]:
+        """Pick the closest destructible obstacle in sight."""
+        destructible = [
+            o for o in seen_obstacles
+            if (o.get("is_destructible", False) if isinstance(o, dict) else getattr(o, "is_destructible", False))
+        ]
+        if not destructible:
+            return None
+
+        best = None
+        best_dist = float("inf")
+        for obs in destructible:
+            x, y = to_xy(
+                obs.get("position", {}) if isinstance(obs, dict) else getattr(obs, "_position", getattr(obs, "position", None))
+            )
+            d = euclidean_distance(my_x, my_y, x, y)
+            if d < best_dist:
+                best_dist = d
+                best = obs
+        return best
+
     def _select_target(
         self,
         my_x: float,
@@ -410,48 +436,11 @@ class FuzzyTurretController:
         ammo_stocks: dict[str, int],
         current_ammo: Optional[str],
     ) -> Optional[str]:
-        """Pick the best ammo type for the given enemy distance and stock levels.
-
-        Returns the ammo name to load, or ``None`` if the current ammo is already
-        the best choice (or nothing useful is available).
-        """
-        if not ammo_stocks:
-            return None
-
-        current_ammo = (current_ammo or "").upper()
-
-        candidates: list[tuple[float, str]] = []
-        for name, spec in AMMO_SPECS.items():
-            count = ammo_stocks.get(name, 0)
-            if count <= 0:
-                continue
-
-            if enemy_distance is not None and enemy_distance > spec["range"]:
-                continue
-
-            score = spec["damage"]
-            if enemy_distance is not None:
-                range_ratio = enemy_distance / spec["range"]
-                if range_ratio > 0.85:
-                    score *= 0.7
-                elif range_ratio < 0.5:
-                    score *= 1.15
-            score += min(count, 10) * 0.5
-            candidates.append((score, name))
-
-        if not candidates:
-            for name in ("LIGHT", "LONG_DISTANCE", "HEAVY"):
-                if ammo_stocks.get(name, 0) > 0:
-                    if name == current_ammo:
-                        return None
-                    return name
-            return None
-
-        candidates.sort(key=lambda t: -t[0])
-        best = candidates[0][1]
-        if best == current_ammo:
-            return None
-        return best
+        """Return the first ammo name with amount > 0, or None if none are available."""
+        for name, amount in ammo_stocks.items():
+            if amount > 0:
+                return name
+        return None
 
     def update(
         self,
@@ -463,23 +452,26 @@ class FuzzyTurretController:
         max_barrel_rotation: float,
         ammo_stocks: Optional[dict[str, int]] = None,
         current_ammo: Optional[str] = None,
+        seen_obstacles: Optional[List[Any]] = None,
     ) -> Tuple[float, bool, Optional[str]]:
-        """Returns ``(barrel_rotation, should_fire, ammo_to_load)``."""
+        """Returns ``(barrel_rotation, should_fire, ammo_to_load)``.
+
+        Targets enemies first; when no enemies are visible, targets destructible
+        obstacles (e.g. trees) in sight.
+        """
         if self.cooldown_ticks > 0:
             self.cooldown_ticks -= 1
 
-        if not seen_tanks:
+        target = self._select_target(my_x, my_y, seen_tanks) if seen_tanks else None
+        if target is None and seen_obstacles:
+            target = self._select_destructible_obstacle(my_x, my_y, seen_obstacles)
+
+        if target is None:
             rotation = self._adaptive_scan(current_barrel_angle, max_barrel_rotation)
             ammo = self.select_ammo(None, ammo_stocks or {}, current_ammo)
             return rotation, False, ammo
 
         self.ticks_since_last_seen = 0
-
-        target = self._select_target(my_x, my_y, seen_tanks)
-        if target is None:
-            rotation = self._adaptive_scan(current_barrel_angle, max_barrel_rotation)
-            ammo = self.select_ammo(None, ammo_stocks or {}, current_ammo)
-            return rotation, False, ammo
 
         target_x, target_y = to_xy(
             target.get("position", {})

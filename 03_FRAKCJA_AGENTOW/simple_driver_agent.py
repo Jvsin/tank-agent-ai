@@ -39,7 +39,7 @@ class SimpleDriverAgent:
         self.checkpoint_idx: int = 0
         self.tank_id: str = "default"
         self.team: Optional[int] = None
-        self.arrival_radius: float = 15.0
+        self.arrival_radius: float = 5.0
         self.turret: Optional[FuzzyTurretController] = None
 
         print(f"[{self.name}] online")
@@ -125,7 +125,8 @@ class SimpleDriverAgent:
                     ammo_stocks[key] = int(val or 0)
         current_ammo = str(my_tank_status.get("ammo_loaded", "") or "").upper() or None
 
-        # --- Turret ---
+        # --- Turret (enemies first, then destructible obstacles) ---
+        seen_obstacles = sensor_data.get("seen_obstacles", [])
         barrel_rotation, should_fire, ammo_to_load = self.turret.update(
             my_x=x,
             my_y=y,
@@ -135,6 +136,7 @@ class SimpleDriverAgent:
             max_barrel_rotation=max_barrel,
             ammo_stocks=ammo_stocks,
             current_ammo=current_ammo,
+            seen_obstacles=seen_obstacles,
         )
 
         if current_tick % 60 == 0:
@@ -144,6 +146,7 @@ class SimpleDriverAgent:
                 f"dist={dist:.1f} speed={speed:.2f} turn={turn:.1f} enemies={len(enemies)} ammo={current_ammo}"
             )
 
+        speed = top_speed # why not
         return ActionCommand(
             heading_rotation_angle=turn,
             move_speed=speed,

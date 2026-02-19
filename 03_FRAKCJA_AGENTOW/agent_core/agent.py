@@ -1045,13 +1045,16 @@ class SmartAgent:
                     turn, speed = 0.0, top_speed * 0.5
                     mode = "patrol"
 
-        barrel_rotation, should_fire = self.turret.update(
+        barrel_rotation, should_fire, _ = self.turret.update(
             my_x=my_x,
             my_y=my_y,
             my_heading=my_heading,
             current_barrel_angle=barrel_angle,
             seen_tanks=sensor.get("seen_tanks", []),
             max_barrel_rotation=max_barrel,
+            ammo_stocks=ammo_stocks,
+            current_ammo=str(my_tank_status.get("ammo_loaded", "") or "").upper() or None,
+            seen_obstacles=sensor.get("seen_obstacles", []),
         )
 
         ammo_loaded = my_tank_status.get("ammo_loaded")
