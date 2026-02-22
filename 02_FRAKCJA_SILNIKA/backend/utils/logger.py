@@ -47,8 +47,6 @@ class GameEventType(Enum):
 class GameLogger:
     """Main logging class for the game engine."""
 
-    LOGGING_ENABLED = False
-
     def __init__(self, log_dir: str = "logs", log_level: str = "INFO"):
         """
         Initialize the game logger.
@@ -59,8 +57,6 @@ class GameLogger:
         """
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(exist_ok=True)
-
-        self.enabled = self.LOGGING_ENABLED
 
         self.log_level = getattr(logging, log_level.upper())
         self.current_tick = 0
@@ -90,27 +86,6 @@ class GameLogger:
 
     def _setup_loggers(self):
         """Setup different loggers for different purposes."""
-        if not self.enabled:
-            self.main_logger = logging.getLogger("game_main")
-            self.main_logger.handlers.clear()
-            self.main_logger.addHandler(logging.NullHandler())
-            self.main_logger.disabled = True
-
-            self.event_logger = logging.getLogger("game_events")
-            self.event_logger.handlers.clear()
-            self.event_logger.addHandler(logging.NullHandler())
-            self.event_logger.disabled = True
-
-            self.performance_logger = logging.getLogger("game_performance")
-            self.performance_logger.handlers.clear()
-            self.performance_logger.addHandler(logging.NullHandler())
-            self.performance_logger.disabled = True
-
-            self.error_logger = logging.getLogger("game_errors")
-            self.error_logger.handlers.clear()
-            self.error_logger.addHandler(logging.NullHandler())
-            self.error_logger.disabled = True
-            return
         # Main game logger
         self.main_logger = self._create_logger(
             "game_main",
@@ -179,40 +154,28 @@ class GameLogger:
 
     def debug(self, message: str, **kwargs):
         """Log debug message."""
-        if not self.enabled:
-            return
         self.main_logger.debug(message, extra={"tick": self.current_tick, **kwargs})
 
     def info(self, message: str, **kwargs):
         """Log info message."""
-        if not self.enabled:
-            return
         self.main_logger.info(message, extra={"tick": self.current_tick, **kwargs})
 
     def warning(self, message: str, **kwargs):
         """Log warning message."""
-        if not self.enabled:
-            return
         self.main_logger.warning(message, extra={"tick": self.current_tick, **kwargs})
 
     def error(self, message: str, **kwargs):
         """Log error message."""
-        if not self.enabled:
-            return
         self.main_logger.error(message, extra={"tick": self.current_tick, **kwargs})
         self.error_logger.error(message, extra={"tick": self.current_tick, **kwargs})
 
     def critical(self, message: str, **kwargs):
         """Log critical message."""
-        if not self.enabled:
-            return
         self.main_logger.critical(message, extra={"tick": self.current_tick, **kwargs})
         self.error_logger.critical(message, extra={"tick": self.current_tick, **kwargs})
 
     def log_game_event(self, event_type: GameEventType, message: str, **kwargs):
         """Log a specific game event."""
-        if not self.enabled:
-            return
         self.event_logger.info(
             message,
             extra={"tick": self.current_tick, "event_type": event_type.value, **kwargs},
@@ -223,8 +186,6 @@ class GameLogger:
 
     def log_performance(self, metric_type: str, value: Any, **kwargs):
         """Log performance metrics."""
-        if not self.enabled:
-            return
         message = f"{metric_type}: {value}"
         self.performance_logger.info(
             message, extra={"metric_type": metric_type, **kwargs}
@@ -243,8 +204,6 @@ class GameLogger:
 
     def start_game(self, **game_info):
         """Log game start."""
-        if not self.enabled:
-            return
         self.performance_metrics["game_start_time"] = datetime.now()
         self.log_game_event(
             GameEventType.GAME_START,
@@ -255,8 +214,6 @@ class GameLogger:
 
     def end_game(self, **game_results):
         """Log game end and generate summary."""
-        if not self.enabled:
-            return
         self.performance_metrics["game_end_time"] = datetime.now()
         self.performance_metrics["total_ticks"] = self.current_tick
 
@@ -271,22 +228,16 @@ class GameLogger:
 
     def log_tick_start(self, tick: int):
         """Log start of a game tick."""
-        if not self.enabled:
-            return
         self.set_current_tick(tick)
-        # self.debug(f"Tick {tick} started")
+        self.debug(f"Tick {tick} started")
 
     def log_tick_end(self, tick: int, tick_duration: float):
         """Log end of a game tick."""
-        if not self.enabled:
-            return
         self.debug(f"Tick {tick} completed in {tick_duration:.4f}s")
         self.log_performance("tick_time", tick_duration, tick=tick)
 
     def log_tank_action(self, tank_id: str, action_type: str, details: Dict[str, Any]):
         """Log tank actions."""
-        if not self.enabled:
-            return
         message = f"Tank {tank_id} performed {action_type}"
         if action_type == "spawn":
             self.log_game_event(

@@ -105,7 +105,8 @@ def map_to_svg(
 
 def default_map_path() -> Path:
     root = Path(__file__).resolve().parents[2]
-    return root / "02_FRAKCJA_SILNIKA" / "backend" / "maps" / "advanced_road_trees.csv"
+    return root / "02_FRAKCJA_SILNIKA" / "backend" / "maps" / "symmetric.csv"
+    # return root / "02_FRAKCJA_SILNIKA" / "backend" / "maps" / "advanced_road_trees.csv"
 
 
 def main() -> None:

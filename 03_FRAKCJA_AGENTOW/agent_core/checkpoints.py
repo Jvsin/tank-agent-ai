@@ -16,14 +16,22 @@ AMMO_RANGE = {
 # Uwaga: w debug SVG mniejsze y jest wyżej, więc punkty start/end mają relatywnie małe y.
 # Team 1 porusza się ze zachodu na wschód, Team 2 czyta listę od tyłu.
 STATIC_CORRIDOR_CHECKPOINTS: List[Tuple[float, float]] = [
-    (35.0, 45.0),
-    (30.0, 75.0),
-    (35.0, 95.0),
-    (75.0, 95.0),
-    (115.0, 95.0),
-    (145.0, 95.0),
-    (155.0, 55.0),
+    (1, 18),
+    (1, 17),
+    (0, 16),
+    (0, 9),
+    (1, 8),
+    (0.9, 7.1),
+    (1.5, 6.5),
+    (2.1, 6.1),
+    (3, 5),
+    (4, 4),
+    (9, 4),
 ]
+
+STATIC_CORRIDOR_CHECKPOINTS = [(x*10+5, y*10+5) for x, y in STATIC_CORRIDOR_CHECKPOINTS]  # center of tile
+# MIRROR
+STATIC_CORRIDOR_CHECKPOINTS += [(200 - x, y) for x, y in STATIC_CORRIDOR_CHECKPOINTS[::-1]] 
 
 
 def get_firing_range(ammo_loaded: str | None) -> float:

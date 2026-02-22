@@ -45,7 +45,7 @@ from typing import Any, Dict, List, Optional, Union, cast
 
 import httpx
 
-from ..structures import MapInfo, Position, PowerUpData, PowerUpType
+from ..structures import MapInfo, Position, PowerUpData, PowerUpType, AmmoType
 from ..tank.base_tank import Tank
 from ..tank.heavy_tank import HeavyTank
 from ..tank.light_tank import LightTank
@@ -73,7 +73,7 @@ TEAM_B_NBR = 5  # Number of tanks in Team B (Team 2)
 # Base port for agent servers (tank_1_1 -> 8001, tank_1_2 -> 8002, etc.)
 AGENT_BASE_PORT = 8001
 AGENT_HOST = "127.0.0.1"
-AGENT_TIMEOUT = 5.0  # Seconds to wait for agent response
+AGENT_TIMEOUT = 1.0  # Seconds to wait for agent response
 
 
 # ============================================================================
@@ -108,17 +108,19 @@ class TankScoreboard:
 class GameLoop:
     """Główna klasa pętli gry z fazami inicjalizacji, loop i końca."""
 
-    def __init__(self, config: Optional[GameConfig] = None, headless: bool = False):
+    def __init__(self, config: Optional[GameConfig] = None, headless: bool = False, spawn_points: Optional[Dict[int, List[tuple]]] = None):
         """
         Inicjalizacja GameLoop.
 
         Args:
             config: Konfiguracja gry (opcjonalna)
             headless: Czy uruchomić w trybie bez interfejsu graficznego
+            spawn_points: Opcjonalne punkty spawnów dla drużyn {team_id: [(x,y), ...]}
         """
         self.game_core = GameCore(config) if config else create_default_game()
         self.logger = get_logger()
         self.headless = headless
+        self.spawn_points = spawn_points
 
         # Engine components
         self.map_loader = MapLoader()
@@ -504,6 +506,13 @@ class GameLoop:
         Returns:
             Spawn position (clear of obstacles)
         """
+        # Sprawdź czy zdefiniowano własne punkty spawnu
+        if self.spawn_points and team in self.spawn_points:
+            points = self.spawn_points[team]
+            if index < len(points):
+                coords = points[index]
+                return Position(float(coords[0]), float(coords[1]))
+
         if not self.map_info or not self.map_info.size:
             self.logger.warning("MapInfo not available for spawn, using default config size.")
             map_width = self.game_core.config.map_config.width
@@ -717,7 +726,7 @@ class GameLoop:
             self.map_info.powerup_list.append(new_powerup)
 
             # Print to console as requested
-            # print(f"[INFO] Power-up spawned: {new_powerup._powerup_type.name} at ({new_powerup._position.x:.1f}, {new_powerup._position.y:.1f})")
+            print(f"[INFO] Power-up spawned: {new_powerup._powerup_type.name} at ({new_powerup._position.x:.1f}, {new_powerup._position.y:.1f})")
 
             self.logger.log_powerup_action("powerup_new", "spawn", {"type": new_powerup._powerup_type.name, "position": (new_powerup._position.x, new_powerup._position.y)})
             return  # Exit after successful spawn
@@ -817,17 +826,15 @@ class GameLoop:
 
             except httpx.ConnectError:
                 # Agent not running, skip
-                print(f"[AGENT] connect error tank={tank_id} url={connection.base_url}")
+                pass
             except httpx.TimeoutException:
                 self.logger.log_agent_interaction(
                     connection.base_url, "timeout", tank_id=tank_id
                 )
-                print(f"[AGENT] timeout tank={tank_id} url={connection.base_url}")
             except Exception as e:
                 self.logger.log_agent_interaction(
                     connection.base_url, "error", error=str(e), tank_id=tank_id
                 )
-                print(f"[AGENT] error tank={tank_id} url={connection.base_url} err={e}")
 
         return agent_actions
 
@@ -912,28 +919,24 @@ class GameLoop:
             return
 
         # Convert action dicts to ActionCommand-like objects
-        from controller.api import ActionCommand, AmmoType
-
-        def _parse_ammo_to_load(raw: Any) -> Optional[Any]:
-            """Parse ammo_to_load from agent response (string) to AmmoType."""
-            if raw is None:
-                return None
-            s = str(raw).strip().upper()
-            if not s:
-                return None
-            try:
-                return AmmoType[s]
-            except (KeyError, TypeError):
-                return None
-
+        from controller.api import ActionCommand
+        
         actions_converted = {}
         for tank_id, action_dict in agent_actions.items():
             try:
+                ammo_str = action_dict.get("ammo_to_load")
+                ammo_enum = None
+                if ammo_str:
+                    # Clean up string just in case (e.g. "AmmoType.HEAVY" -> "HEAVY")
+                    clean_str = str(ammo_str).replace("AmmoType.", "").upper()
+                    if clean_str in AmmoType.__members__:
+                        ammo_enum = AmmoType[clean_str]
+
                 actions_converted[tank_id] = ActionCommand(
                     barrel_rotation_angle=action_dict.get("barrel_rotation_angle", 0.0),
                     heading_rotation_angle=action_dict.get("heading_rotation_angle", 0.0),
                     move_speed=action_dict.get("move_speed", 0.0),
-                    ammo_to_load=_parse_ammo_to_load(action_dict.get("ammo_to_load")),
+                    ammo_to_load=ammo_enum,
                     should_fire=action_dict.get("should_fire", False)
                 )
             except Exception as e:

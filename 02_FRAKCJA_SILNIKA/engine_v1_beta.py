@@ -53,7 +53,9 @@ except ImportError as e:
 
 # --- Stałe Konfiguracyjne Grafiki ---
 LOG_LEVEL = "DEBUG"
-MAP_SEED = "advanced_road_trees.csv"
+MAP_SEED = "symmetric.csv"
+TEAM_A_SPAWN_POINTS = [(15, 15), (15, 60), (15, 95), (15, 165), (15, 195)]  # Współrzędne (x, y)
+TEAM_B_SPAWN_POINTS = [(185, 15), (185, 60), (185, 95), (185, 165), (185, 195)] # Współrzędne (x, y) na Grass dla drużyny B
 TARGET_FPS = 60
 SCALE = 5  # Współczynnik skalowania grafiki (wszystko będzie 4x większe)
 TILE_SIZE = 10  # To MUSI być zgodne z domyślną wartością w map_loader.py
@@ -528,6 +530,7 @@ def draw_ui(screen: pygame.Surface, font: pygame.font.Font, game_loop: GameLoop,
 
 def draw_debug_info(screen: pygame.Surface, font: pygame.font.Font, clock: pygame.time.Clock, current_tick: int):
     """Rysuje informacje debugowe (FPS, Tick) w lewym górnym rogu."""
+    # Użyj mniejszej czcionki dla informacji debugowych
     debug_font = pygame.font.Font(None, 24)
     
     fps_text = f"FPS: {clock.get_fps():.1f}"
@@ -539,29 +542,6 @@ def draw_debug_info(screen: pygame.Surface, font: pygame.font.Font, clock: pygam
     screen.blit(fps_surf, (10, 10))
     screen.blit(tick_surf, (10, 30))
 
-
-def draw_checkpoints(surface: pygame.Surface, scale: int, map_render_height: int):
-    """Draws STATIC_CORRIDOR_CHECKPOINTS as numbered circles connected by lines."""
-    if not STATIC_CORRIDOR_CHECKPOINTS:
-        return
-
-    CP_COLOR = (0, 255, 180)
-    LINE_COLOR = (0, 180, 120)
-    RADIUS = 6
-    cp_font = pygame.font.Font(None, 20)
-
-    scaled = [
-        (int(cx * scale), int(map_render_height - cy * scale))
-        for cx, cy in STATIC_CORRIDOR_CHECKPOINTS
-    ]
-
-    for i in range(len(scaled) - 1):
-        pygame.draw.line(surface, LINE_COLOR, scaled[i], scaled[i + 1], 2)
-
-    for idx, (sx, sy) in enumerate(scaled):
-        pygame.draw.circle(surface, CP_COLOR, (sx, sy), RADIUS, 2)
-        label = cp_font.render(str(idx + 1), True, CP_COLOR)
-        surface.blit(label, (sx + RADIUS + 2, sy - 8))
 
 
 def main():
@@ -578,7 +558,13 @@ def main():
         return
 
     # --- Inicjalizacja Gry ---
-    game_loop = GameLoop(headless=False)
+    game_loop = GameLoop(
+        headless=False,
+        spawn_points={
+            1: TEAM_A_SPAWN_POINTS,
+            2: TEAM_B_SPAWN_POINTS
+        }
+    )
 
     try:
         # 1. Uruchomienie serwerów agentów (teraz używamy random_agent.py)
@@ -656,11 +642,10 @@ def main():
                 break
 
             screen.fill(BACKGROUND_COLOR)
-            map_surface.blit(background_surface, (0, 0))
-            draw_checkpoints(map_surface, SCALE, map_render_height)
-            screen.blit(map_surface, map_rect)
-            draw_ui(screen, font, game_loop, window_width, map_rect, assets)
-            draw_debug_info(screen, font, clock, 0)
+            map_surface.blit(background_surface, (0, 0)) # Narysuj tło na powierzchni mapy
+            screen.blit(map_surface, map_rect) # Narysuj powierzchnię mapy na ekranie
+            draw_ui(screen, font, game_loop, window_width, map_rect, assets) # Narysuj UI
+            draw_debug_info(screen, font, clock, 0) # Pokaż info debugowe
 
             # --- DODANE: Pulsujący napis "Press SPACE to start" ---
             # Używamy sinusa do uzyskania płynnej pulsacji alpha (przezroczystości)
@@ -791,7 +776,6 @@ def main():
 
             # Rysuj tło na powierzchni mapy (czyści poprzednią klatkę)
             map_surface.blit(background_surface, (0, 0))
-            draw_checkpoints(map_surface, SCALE, map_render_height)
             # Rysowanie power-upów
             for powerup in game_loop.map_info.powerup_list:
                 asset_key = POWERUP_ASSET_MAP.get(powerup._powerup_type.name)
