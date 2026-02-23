@@ -28,8 +28,8 @@ class ActionCommand(BaseModel):
     should_fire: bool = False
 
 
-class SimpleDriverAgent:
-    def __init__(self, name: str = "SimpleDriver", enable_autonomous: bool = True):
+class TankAgent:
+    def __init__(self, name: str = "TankAgent", enable_autonomous: bool = True):
         self.name = name
         self.is_destroyed = False
         self.enable_autonomous = enable_autonomous
@@ -332,7 +332,7 @@ class SimpleDriverAgent:
 
 
 app = FastAPI(title="Simple Driver Agent", version="1.0.0")
-agent = SimpleDriverAgent()
+agent = TankAgent()
 
 
 @app.get("/")
@@ -378,7 +378,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    agent = SimpleDriverAgent(enable_autonomous=args.autonomous)
+    agent = TankAgent(enable_autonomous=args.autonomous)
 
     if args.name:
         agent.name = args.name
