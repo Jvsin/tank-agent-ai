@@ -32,14 +32,6 @@ AMMO_SPECS: dict[str, dict[str, float]] = {
 
 
 class FuzzyTurretController:
-    """
-    This controller uses four fuzzy inference systems:
-    1. Target Selection: Prioritizes enemies based on distance and threat level
-    2. Rotation Speed: Adapts rotation speed based on angle error and distance
-    3. Firing Decision: Determines when to fire based on aiming, distance, and vulnerability
-    4. Adaptive Scanning: Intelligently scans when no enemies are visible
-    """
-
     def __init__(
         self,
         max_barrel_spin_rate: float,
@@ -383,7 +375,7 @@ class FuzzyTurretController:
             self.rotation_speed_sim.input["angle_error"] = min(abs(angle_error), 180)
             self.rotation_speed_sim.input["target_distance"] = min(distance, max_dist)
             self.rotation_speed_sim.compute()
-            # cast to native float (skfuzzy may return numpy scalar)
+
             return float(self.rotation_speed_sim.output["speed_factor"])
         except Exception:
             if abs(angle_error) < 5:
@@ -417,7 +409,7 @@ class FuzzyTurretController:
             self.firing_decision_sim.compute()
 
             fire_confidence = self.firing_decision_sim.output["fire_confidence"]
-            # Ensure native Python bool to avoid numpy.bool_ in tests
+
             return bool(fire_confidence >= FIRE_CONFIDENCE_THRESHOLD)
         except Exception:
             return bool(abs(angle_error) <= self.aim_threshold)
@@ -462,7 +454,6 @@ class FuzzyTurretController:
         ammo_stocks: dict[str, int],
         current_ammo: Optional[str],
     ) -> Optional[str]:
-        """Return the first ammo name with amount > 0, or None if none are available."""
         for name, amount in ammo_stocks.items():
             if amount > 0:
                 return name
@@ -480,11 +471,6 @@ class FuzzyTurretController:
         current_ammo: Optional[str] = None,
         seen_obstacles: Optional[List[Any]] = None,
     ) -> Tuple[float, bool, Optional[str]]:
-        """Returns ``(barrel_rotation, should_fire, ammo_to_load)``.
-
-        Targets enemies first; when no enemies are visible, targets destructible
-        obstacles (e.g. trees) in sight.
-        """
         if self.cooldown_ticks > 0:
             self.cooldown_ticks -= 1
 

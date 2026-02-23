@@ -1,13 +1,3 @@
-"""
-Simple checkpoint-following agent.
-
-Drives from checkpoint to checkpoint along STATIC_CORRIDOR_CHECKPOINTS.
-No shooting, no turret rotation -- pure navigation.
-
-Usage:
-    python simple_driver_agent.py --port 8001
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -20,7 +10,12 @@ import uvicorn
 from agent_core.checkpoints import STATIC_CORRIDOR_CHECKPOINTS, lane_offset_checkpoint
 from agent_core.driver import MotionDriver
 from agent_core.fuzzy_turret import FuzzyTurretController
-from agent_core.geometry import euclidean_distance, heading_to_angle_deg, normalize_angle_diff, to_xy
+from agent_core.geometry import (
+    euclidean_distance,
+    heading_to_angle_deg,
+    normalize_angle_diff,
+    to_xy,
+)
 from agent_core.planner import AStarPlanner
 from agent_core.world_model import WorldModel
 
@@ -46,8 +41,7 @@ class SimpleDriverAgent:
         self.arrival_radius: float = 3.0
         self.turret: Optional[FuzzyTurretController] = None
 
-        # Autonomous mode components
-        self.mode: str = "checkpoint"  # "checkpoint" or "autonomous"
+        self.mode: str = "checkpoint"
         self.world_model: Optional[WorldModel] = None
         self.planner: Optional[AStarPlanner] = None
         self.driver: Optional[MotionDriver] = None
@@ -57,8 +51,9 @@ class SimpleDriverAgent:
         status = "with autonomous mode" if enable_autonomous else "checkpoint-only"
         print(f"[{self.name}] online ({status})")
 
-    def _init_checkpoints(self, my_tank_status: Dict[str, Any], x: float, y: float) -> None:
-        """Build the checkpoint list on the first tick based on team / position."""
+    def _init_checkpoints(
+        self, my_tank_status: Dict[str, Any], x: float, y: float
+    ) -> None:
         self.team = my_tank_status.get("_team")
         if self.team is None:
             self.team = 2 if x > 100.0 else 1
@@ -69,21 +64,21 @@ class SimpleDriverAgent:
             self.checkpoints = list(STATIC_CORRIDOR_CHECKPOINTS)
 
         self.tank_id = str(my_tank_status.get("_id", "default"))
-        
-        # Find the closest checkpoint to start from
+
         closest_idx = 0
-        closest_dist = float('inf')
+        closest_dist = float("inf")
         for idx, cp in enumerate(self.checkpoints):
             tx, ty = lane_offset_checkpoint(self.tank_id, cp)
             dist = euclidean_distance(x, y, tx, ty)
             if dist < closest_dist:
                 closest_dist = dist
                 closest_idx = idx
-        
+
         self.checkpoint_idx = closest_idx
-        print(f"[{self.name}] team={self.team} start_cp={closest_idx + 1}/{len(self.checkpoints)} dist={closest_dist:.1f}")
-        
-        # Initialize autonomous mode components if enabled
+        print(
+            f"[{self.name}] team={self.team} start_cp={closest_idx + 1}/{len(self.checkpoints)} dist={closest_dist:.1f}"
+        )
+
         if self.enable_autonomous:
             self.world_model = WorldModel(map_size=200)
             self.planner = AStarPlanner(self.world_model)
@@ -96,34 +91,29 @@ class SimpleDriverAgent:
         return lane_offset_checkpoint(self.tank_id, cp)
 
     def _check_autonomous_threshold(self, y: float) -> bool:
-        """Check if tank has crossed the threshold to enable autonomous mode."""
         if not self.enable_autonomous or self.mode == "autonomous":
             return False
-        
-        # Team 1 starts from high Y (~180), crosses into enemy territory at Y <= 80
-        # Team 2 starts from high Y (~180), crosses into enemy territory at Y >= 120
+
         if self.team == 1 and y <= 80.0:
             return True
         elif self.team == 2 and y >= 120.0:
             return True
         return False
 
-    def _update_world_model(self, x: float, y: float, sensor_data: Dict[str, Any]) -> None:
-        """Update world model from sensor data for pathfinding."""
+    def _update_world_model(
+        self, x: float, y: float, sensor_data: Dict[str, Any]
+    ) -> None:
         if not self.world_model:
             return
-        
-        # Decay old information
+
         self.world_model.decay()
-        
-        # Mark obstacles as blocked
+
         for obstacle in sensor_data.get("seen_obstacles", []):
             ox = float(obstacle.get("position", {}).get("x", 0))
             oy = float(obstacle.get("position", {}).get("y", 0))
             cell = self.world_model.to_cell(ox, oy)
             self.world_model.get_state(cell).blocked += 1.5
-        
-        # Mark hazardous terrain as dangerous
+
         for terrain in sensor_data.get("seen_terrains", []):
             dmg = terrain.get("dmg", 0)
             if dmg > 0:
@@ -132,36 +122,34 @@ class SimpleDriverAgent:
                 cell = self.world_model.to_cell(tx, ty)
                 danger_score = 3.0 if dmg >= 2 else 1.5
                 self.world_model.get_state(cell).danger += danger_score
-        
-        # Mark ally and enemy positions
+
         for tank in sensor_data.get("seen_tanks", []):
             tank_team = tank.get("team")
             tank_x = float(tank.get("position", {}).get("x", 0))
             tank_y = float(tank.get("position", {}).get("y", 0))
             cell = self.world_model.to_cell(tank_x, tank_y)
-            
+
             if tank_team == self.team:
-                # Ally - avoid collision
                 self.world_model.mark_ally_occupancy(cell, ttl=10)
             else:
-                # Enemy - mark as dangerous
                 self.world_model.mark_enemy_occupancy(cell, ttl=10)
-        
-        # Mark powerups as preferred
+
         for powerup in sensor_data.get("seen_powerups", []):
             px = float(powerup.get("position", {}).get("x", 0))
             py = float(powerup.get("position", {}).get("y", 0))
             cell = self.world_model.to_cell(px, py)
             self.world_model.powerup_cells.add(cell)
 
-    def _select_autonomous_goal(self, x: float, y: float, sensor_data: Dict[str, Any]) -> Optional[Tuple[float, float]]:
-        """Select goal for autonomous navigation: enemies > powerups > exploration."""
-        enemies = [t for t in sensor_data.get("seen_tanks", []) if t.get("team") != self.team]
-        
-        # Priority 1: Hunt closest enemy
+    def _select_autonomous_goal(
+        self, x: float, y: float, sensor_data: Dict[str, Any]
+    ) -> Optional[Tuple[float, float]]:
+        enemies = [
+            t for t in sensor_data.get("seen_tanks", []) if t.get("team") != self.team
+        ]
+
         if enemies:
             closest_enemy = None
-            closest_dist = float('inf')
+            closest_dist = float("inf")
             for enemy in enemies:
                 ex = float(enemy.get("position", {}).get("x", 0))
                 ey = float(enemy.get("position", {}).get("y", 0))
@@ -170,12 +158,11 @@ class SimpleDriverAgent:
                     closest_dist = dist
                     closest_enemy = (ex, ey)
             return closest_enemy
-        
-        # Priority 2: Collect closest powerup
+
         powerups = sensor_data.get("seen_powerups", [])
         if powerups:
             closest_powerup = None
-            closest_dist = float('inf')
+            closest_dist = float("inf")
             for powerup in powerups:
                 px = float(powerup.get("position", {}).get("x", 0))
                 py = float(powerup.get("position", {}).get("y", 0))
@@ -184,29 +171,25 @@ class SimpleDriverAgent:
                     closest_dist = dist
                     closest_powerup = (px, py)
             return closest_powerup
-        
-        # Priority 3: Explore toward enemy territory
+
         if self.team == 1:
-            # Team 1 pushes toward x > 100 (right side)
             return (150.0, y)
         else:
-            # Team 2 pushes toward x < 100 (left side)
             return (50.0, y)
 
     def _compute_path(self, x: float, y: float, goal: Tuple[float, float]) -> bool:
-        """Compute A* path to goal. Returns True if path found."""
         if not self.world_model or not self.planner:
             return False
-        
+
         my_cell = self.world_model.to_cell(x, y)
         goal_cell = self.world_model.to_cell(goal[0], goal[1])
-        
+
         try:
             self.path = self.planner.build_path(my_cell, goal_cell, radius=18)
             if not self.path:
-                # Mark as dead-end if pathfinding failed
                 self.world_model.mark_dead_end(my_cell, ttl=30)
                 return False
+
             return True
         except Exception as e:
             print(f"[{self.name}] pathfinding error: {e}")
@@ -238,22 +221,17 @@ class SimpleDriverAgent:
 
         assert self.checkpoints is not None
 
-        # --- Check for autonomous mode transition ---
         if self._check_autonomous_threshold(y):
             self.mode = "autonomous"
             print(f"[{self.name}] switching to AUTONOMOUS mode at y={y:.1f}")
 
-        # --- Update world model for pathfinding ---
         if self.mode == "autonomous":
             self._update_world_model(x, y, sensor_data)
 
-        # --- Ally / enemy split ---
         seen = sensor_data.get("seen_tanks", [])
         enemies = [t for t in seen if t.get("team") != self.team]
 
-        # --- Navigation logic (checkpoint or autonomous) ---
         if self.mode == "checkpoint":
-            # --- Checkpoint movement ---
             while self.checkpoint_idx < len(self.checkpoints) - 1:
                 tx, ty = self._current_target()
                 if euclidean_distance(x, y, tx, ty) < self.arrival_radius:
@@ -273,37 +251,32 @@ class SimpleDriverAgent:
             else:
                 speed = top_speed
         else:
-            # --- Autonomous A* pathfinding ---
             self.replan_cooldown -= 1
-            
-            # Replan if cooldown expired or no path
+
             if self.replan_cooldown <= 0 or not self.path:
                 goal = self._select_autonomous_goal(x, y, sensor_data)
                 if goal:
                     if self._compute_path(x, y, goal):
                         if self.driver:
                             self.driver.path = self.path
-                        self.replan_cooldown = 30  # Replan every ~0.5 seconds
+                        self.replan_cooldown = 30
                 else:
-                    # No goal found, continue straight
                     self.path = []
-            
-            # Follow path using MotionDriver
+
             if self.path and self.driver:
                 turn, speed = self.driver.drive_path(x, y, heading, top_speed)
             else:
-                # Fallback: move forward slowly
                 turn = 0.0
                 speed = top_speed * 0.5
-            
-            # Target for logging
+
             if self.path:
-                next_cell = self.path[0] if self.path else self.world_model.to_cell(x, y)
+                next_cell = (
+                    self.path[0] if self.path else self.world_model.to_cell(x, y)
+                )
                 tx, ty = self.world_model.from_cell(next_cell[0], next_cell[1])
             else:
                 tx, ty = x, y
 
-        # --- Ammo inventory ---
         ammo_stocks: Dict[str, int] = {}
         raw_ammo = my_tank_status.get("ammo", {})
         if isinstance(raw_ammo, dict):
@@ -314,7 +287,6 @@ class SimpleDriverAgent:
                     ammo_stocks[key] = int(val or 0)
         current_ammo = str(my_tank_status.get("ammo_loaded", "") or "").upper() or None
 
-        # --- Turret (enemies first, then destructible obstacles) ---
         seen_obstacles = sensor_data.get("seen_obstacles", [])
         barrel_rotation, should_fire, ammo_to_load = self.turret.update(
             my_x=x,
@@ -342,7 +314,7 @@ class SimpleDriverAgent:
                     f"dist={dist:.1f} speed={speed:.2f} turn={turn:.1f} enemies={len(enemies)} ammo={current_ammo}"
                 )
 
-        speed = top_speed # why not
+        speed = top_speed
         return ActionCommand(
             heading_rotation_angle=turn,
             move_speed=speed,
@@ -360,12 +332,15 @@ class SimpleDriverAgent:
 
 
 app = FastAPI(title="Simple Driver Agent", version="1.0.0")
-agent = SimpleDriverAgent()  # Will be recreated in __main__ with args
+agent = SimpleDriverAgent()
 
 
 @app.get("/")
 async def root():
-    return {"message": f"Agent {agent.name} is running", "destroyed": agent.is_destroyed}
+    return {
+        "message": f"Agent {agent.name} is running",
+        "destroyed": agent.is_destroyed,
+    }
 
 
 @app.post("/agent/action", response_model=ActionCommand)
@@ -396,15 +371,21 @@ if __name__ == "__main__":
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8001)
     parser.add_argument("--name", type=str, default=None)
-    parser.add_argument("--autonomous", action="store_true", help="Enable autonomous A* pathfinding after crossing threshold")
+    parser.add_argument(
+        "--autonomous",
+        action="store_true",
+        help="Enable autonomous A* pathfinding after crossing threshold",
+    )
     args = parser.parse_args()
 
     agent = SimpleDriverAgent(enable_autonomous=args.autonomous)
-    
+
     if args.name:
         agent.name = args.name
     else:
         agent.name = f"SimpleDriver_{args.port}"
 
     print(f"Starting {agent.name} on {args.host}:{args.port}")
-    uvicorn.run(app, host=args.host, port=args.port, log_level="warning", access_log=False)
+    uvicorn.run(
+        app, host=args.host, port=args.port, log_level="warning", access_log=False
+    )
