@@ -30,6 +30,8 @@ AMMO_SPECS: dict[str, dict[str, float]] = {
     "LONG_DISTANCE": {"range": 100.0, "damage": 25.0, "reload": 10.0},
 }
 
+LAST_SEEN_EXPIRY_TICKS = 40
+
 
 class FuzzyTurretController:
     def __init__(
@@ -421,6 +423,9 @@ class FuzzyTurretController:
     ) -> float:
         self.ticks_since_last_seen += 1
 
+        if self.ticks_since_last_seen >= LAST_SEEN_EXPIRY_TICKS:
+            self.last_seen_direction = None
+
         scan_direction_error = 90.0
         if self.last_seen_direction is not None:
             scan_direction_error = abs(
@@ -442,7 +447,7 @@ class FuzzyTurretController:
                 )
                 rotation = speed_factor * max_rotation * np.sign(direction_diff)
             else:
-                rotation = speed_factor * max_rotation * 0.5
+                rotation = speed_factor * max_rotation
 
             return float(max(-max_rotation, min(max_rotation, rotation)))
         except Exception:
