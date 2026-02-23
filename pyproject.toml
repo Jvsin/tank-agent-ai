@@ -1,0 +1,26 @@
+[project]
+name = "tank-agent-ai"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "arcade>=2.6.0",
+    "black>=23.0.0",
+    "colorlog>=6.7.0",
+    "dataclasses-json>=0.5.0",
+    "fastapi>=0.129.0",
+    "flake8>=6.0.0",
+    "httpx>=0.24.0",
+    "mypy>=1.0.0",
+    "networkx>=3.6.1",
+    "numba>=0.56.0",
+    "numpy>=1.24.0",
+    "pydantic>=1.10.0",
+    "pygame>=2.5.0",
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "scikit-fuzzy>=0.5.0",
+    "scipy>=1.10.0",
+    "uvicorn>=0.40.0",
+]
